@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">onlyread</string>
+    <string name="shelf_title">书架</string>
+    <string name="menu_import">导入</string>
+    <string name="shelf_empty">书架还是空的\n点右上角「导入」添加 EPUB</string>
+    <string name="perm_title">需要「所有文件访问」权限</string>
+    <string name="perm_desc">onlyread 按需导入你手动选择的 EPUB，并直接从原位置阅读（不复制、不改动原文件）。</string>
+    <string name="perm_grant">去授权</string>
+    <string name="perm_fallback">请到 设置 → 应用 → onlyread → 权限 中手动授权</string>
+    <string name="browser_title">选择 EPUB 文件</string>
+    <string name="browser_empty">此目录没有 EPUB 文件</string>
+    <string name="tip_importing">正在导入…</string>
+    <string name="tip_no_permission">未获得存储权限，请先在书架页授权</string>
+    <string name="dialog_delete_title">删除书籍记录</string>
+    <string name="dialog_delete_msg">仅从书架移除该记录，不删除原文件。</string>
+    <string name="action_delete">删除</string>
+    <string name="action_cancel">取消</string>
+    <string name="open_fail">无法打开该书：文件缺失或解析失败</string>
+    <string name="toc_title">目录</string>
+    <string name="toc_empty">未找到目录</string>
+    <string name="info_fmt">%1$d%% · 第%2$d/%3$d页 · 章节%4$d/%5$d</string>
+
+    <!-- M2：阅读设置 / 脚注 -->
+    <string name="settings_title">阅读设置</string>
+    <string name="set_theme">主题</string>
+    <string name="set_font">字号</string>
+    <string name="set_line">行距</string>
+    <string name="set_family">字族</string>
+    <string name="set_immersive">全屏沉浸阅读</string>
+    <string name="theme_white">白</string>
+    <string name="theme_paper">纸</string>
+    <string name="theme_night">夜</string>
+    <string name="fam_book">书内</string>
+    <string name="fam_serif">衬线</string>
+    <string name="fam_sans">黑体</string>
+    <string name="action_done">完成</string>
+    <string name="footnote_title">脚注</string>
+    <string name="footnote_empty">未找到对应脚注内容</string>
+    <string name="image_fail">无法加载图片</string>
+    <string name="set_margin">页边距</string>
+    <string name="set_margin_top">上边距</string>
+    <string name="set_margin_bottom">下边距</string>
+    <string name="set_margin_left">左边距</string>
+    <string name="set_margin_right">右边距</string>
+    <string name="set_fn_font">注释字号</string>
+    <string name="import_pick">选择文件导入</string>
+    <string name="import_need_local">无法定位所选文件的原路径，请用系统「文件」应用选择本机文件</string>
+    <string name="search_title">全书搜索</string>
+    <string name="search_btn">搜索</string>
+    <string name="search_hint">输入关键词</string>
+    <string name="search_regex">正则</string>
+    <string name="search_progress">搜索中 %1$d/%2$d · 已找到 %3$d 条</string>
+    <string name="search_done">搜索完成 · 共 %1$d 条（上限 500）</string>
+    <string name="sel_copy">复制</string>
+    <string name="sel_share">分享</string>
+    <string name="sel_search">搜索</string>
+    <string name="sel_copied">已复制</string>
+    <string name="notes_title">注释</string>
+    <string name="set_custom_font">自定义字体</string>
+    <string name="pick_font_btn">选择字体文件（TTF/OTF）</string>
+    <string name="font_in_use">已使用自定义字体（点按可更换）</string>
+    <string name="pick_font_fail">无法读取所选文件</string>
+    <string name="font_ok">自定义字体已应用</string>
+</resources>

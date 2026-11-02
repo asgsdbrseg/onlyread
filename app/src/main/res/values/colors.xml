@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="primary">#1A2029</color>
+    <color name="bg">#FFFFFF</color>
+    <color name="text_main">#1A2029</color>
+    <color name="text_sub">#838A95</color>
+    <color name="divider">#EBEDF1</color>
+    <color name="cover_ph">#F0F1F4</color>
+    <color name="perm_card">#FFF4E5</color>
+    <color name="ic_launcher_bg">#1A2029</color>
+</resources>
