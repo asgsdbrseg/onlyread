@@ -147,25 +147,52 @@ class BookActivity : Activity() {
               if(r.width<=0||r.height<=0)continue;
               if(r.left>=-2&&r.left<lim)return i;}return -1;}
             function __report(){try{ReaderBridge.onLayout(__r.page,__r.total,__anchorOrd());}catch(e){}}
-            window.__go=function(n){var t=__r.total;n=Math.max(0,Math.min(n,t-1));__r.page=n;
+            // M3.3：byUser=1 表示用户翻页（Kotlin goTo）→ 置 __touched，
+            // 阻止字体就绪后的 __reanchor 重定位覆盖已发生的翻页
+            window.__go=function(n,byUser){var t=__r.total;n=Math.max(0,Math.min(n,t-1));
+              if(window.__initDone&&byUser)window.__touched=true;__r.page=n;
               __apply();__report();};
             function __recompute(){__meas();if(__r.page>=__r.total){__go(__r.total-1);return;}__report();}
+            // M3.3：进度恢复后按锚重定位——首次 __initReader 定位发生在自定义字体
+            // 加载完成前，布局漂移会让恢复位置偏差一页；fonts.ready 后重算锚页并纠正
+            function __reanchor(){if(!window.__initAnchor||window.__touched||!window.__initDone)return;
+              var a=window.__initAnchor;
+              if(a.elem!==undefined&&a.elem!==null&&a.elem>=0){
+                var p2=__pageOfElem(a.elem);
+                if(p2>=0&&p2!==__r.page)__go(p2);}
+              else if(a.frac!==undefined&&a.frac!==null){
+                var p3=Math.round(a.frac*(__r.total-1));
+                if(p3>=0&&p3!==__r.page)__go(p3);}}
             window.__initReader=function(W,G,Mx,anchor,Vx,Bx){__r.W=W||0;__r.G=G||0;__r.M=Mx||0;__r.V=Vx||34;__r.B=Bx||0;__meas();
+              window.__initAnchor=anchor||null;window.__touched=false;window.__initDone=false;
               var de=document.documentElement;de.scrollLeft=0;de.scrollTop=0;
               var pg=0;
               if(anchor&&anchor.elem!==undefined&&anchor.elem!==null&&anchor.elem>=0){
                 var p=__pageOfElem(anchor.elem);pg=p>=0?p:Math.max(0,Math.min(anchor.fb||0,__r.total-1));}
               else if(anchor&&anchor.frac!==undefined){pg=Math.round(anchor.frac*(__r.total-1));}
               else if(anchor&&anchor.frag){
-                // 同文件多标题：定位到 #fragment 所在页（换算内容坐标，不依赖当前位移）
+                // 同文件多标题/搜索锚：定位到目标所在页（换算内容坐标，不依赖当前位移）
+                // M3.2：Kotlin 注入改用 data-srch0 属性（保留原 id），getElementById 未命中时按属性找；
+                // 目标若仍在 data-fnhide 内（rect 全零会导致页码算成 0/章首）→ 现场移除隐藏标记再测
                 var fe=null;try{fe=document.getElementById(anchor.frag);}catch(e){}
+                if(!fe){try{fe=document.querySelector('[data-srch0]');}catch(e){}}
                 if(fe){var fr=fe.getBoundingClientRect();
+                  if(fr.width<=0&&fr.height<=0){var anc=fe;
+                    while(anc&&anc.nodeType===1){
+                      if(anc.getAttribute&&anc.getAttribute('data-fnhide')!==null){
+                        anc.removeAttribute('data-fnhide');__meas();
+                        fr=fe.getBoundingClientRect();break;}
+                      anc=anc.parentNode;}}
                   var fx=fr.left+__r.page*__r.W;
                   pg=Math.floor((fx-__r.M)/__r.W);
                   if(!(pg>=0))pg=0;if(pg>__r.total-1)pg=__r.total-1;}
                 else pg=0;}
               else if(anchor&&anchor.page!==undefined){pg=(anchor.page<0)?__r.total-1:Math.min(anchor.page,__r.total-1);}
               __go(pg);
+              window.__initDone=true;
+              if(document.fonts&&document.fonts.ready){try{document.fonts.ready.then(function(){setTimeout(__reanchor,80);});}catch(e){}}
+              setTimeout(__reanchor,600);
+              setTimeout(__reanchor,1500);
               setTimeout(function(){__recompute();},200);
               setTimeout(function(){__recompute();},900);};
             // —— M2：主题 / 排版 / 脚注 ——
@@ -310,6 +337,7 @@ class BookActivity : Activity() {
     private var curSpinePath = ""       // 当前章节 zip 内路径（同文件脚注解析基准）
     private var curFnPath = ""          // 当前弹注内容来源文件（弹注内点击注释标记的解析基准）
     private var pendingSrchHtml = HashMap<Int, Pair<String, String>>() // M3：搜索高亮覆盖 (spineIdx → html/charset)
+    private var pendingFnHtml: String? = null // M3.3：搜索命中注释 → 章节渲染完成后自动弹注的内容
 
     private lateinit var webView: WebView
     private lateinit var infoBar: TextView
@@ -480,6 +508,12 @@ class BookActivity : Activity() {
                 curAnchor = anchor
                 if (!scrollMode) updateInfo()
                 saveProgress()
+                // M3.3：搜索命中注释 → 页面就绪后弹出注释内容（一次性）
+                val fn = pendingFnHtml
+                if (fn != null) {
+                    pendingFnHtml = null
+                    showFootnote(fn)
+                }
             }
         }
 
@@ -575,25 +609,9 @@ class BookActivity : Activity() {
         }
         archive = EpubArchive(parsed.first)
         epub = parsed.second
-        // 目录：优先用本次解析结果（含 #fragment，支持同文件多标题），并刷新缓存
         val bookObj = parsed.second
-        toc = bookObj.toc.mapIndexed { i, t ->
-            TocRow(i, t.spineIndex, t.title, t.level, t.frag ?: "")
-        }
-        if (toc.isNotEmpty()) {
-            try { db.replaceToc(bookId, toc) } catch (_: Exception) {}
-        } else {
-            toc = try {
-                db.getToc(bookId)
-            } catch (_: Exception) {
-                emptyList()
-            }
-        }
-        try {
-            db.touch(bookId, System.currentTimeMillis())
-        } catch (_: Exception) {
-        }
-
+        // M3.3：优先恢复阅读——先读进度、立即加载进度章；
+        // 目录入库（replaceToc 全量写库）与书架活跃时间延后，不阻塞首章渲染
         val p = try {
             db.getProgress(bookId)
         } catch (_: Exception) {
@@ -606,6 +624,28 @@ class BookActivity : Activity() {
             } else {
                 loadSpine(0, Anchor.First)
             }
+        }
+        // 目录与元数据收尾（后台）：内存列表经 ui.post 赋值（目录 UI 主线程读）
+        val tocRows = bookObj.toc.mapIndexed { i, t ->
+            TocRow(i, t.spineIndex, t.title, t.level, t.frag ?: "")
+        }
+        if (tocRows.isNotEmpty()) {
+            ui.post { toc = tocRows }
+            Thread {
+                try { db.replaceToc(bookId, tocRows) } catch (_: Exception) {}
+                try { db.touch(bookId, System.currentTimeMillis()) } catch (_: Exception) {}
+            }.start()
+        } else {
+            // 本次解析无目录（罕见）：回退 DB 缓存；touch 仍延后
+            val cached = try {
+                db.getToc(bookId)
+            } catch (_: Exception) {
+                emptyList()
+            }
+            ui.post { toc = cached }
+            Thread {
+                try { db.touch(bookId, System.currentTimeMillis()) } catch (_: Exception) {}
+            }.start()
         }
     }
 
@@ -703,6 +743,8 @@ class BookActivity : Activity() {
             "table{max-width:100%;}" +
             // M3：Reasily 式——正文中的注释块不进正文流（内容仍在 DOM，弹窗可取）
             "[data-fnhide]{display:none !important;}" +
+            // M3.2：搜索命中注释块时展开显示（双属性选择器优先级高于单属性 fnhide）
+            "[data-fnhide][data-fnshow]{display:block !important;}" +
             "</style>"
         // ⚠️ INIT_JS 必须随页面注入（此前只在 onPageFinished 里调用导致 window.__initReader 未定义，分页失效）
         val script = "<script>" + INIT_JS +
@@ -849,8 +891,10 @@ class BookActivity : Activity() {
     private fun goTo(n: Int) {
         curPage = n.coerceIn(0, curTotal - 1)
         updateInfo()
-        runJs("window.__go($curPage);")
-        saveProgress()
+        // M3.3：不在翻页瞬间保存——此时 curAnchor 仍是上一页回报的元素序号，
+        // 旧锚 + 新页码写入 DB 会导致重开书回退一页；统一由 onLayout 回报后保存。
+        // byUser=1 置 __touched，阻止 JS 字体就绪后的重定位锚覆盖用户已发生的翻页
+        runJs("window.__go($curPage,1);")
     }
 
     private fun spineIndexForPath(rawPath: String): Int {
@@ -1045,10 +1089,13 @@ class BookActivity : Activity() {
         return sp
     }
 
-    // M3：搜索会话缓存——流式追加；打断扫描后已得结果保留，重开弹窗可见
-    private var searchHits = ArrayList<SearchHit>()
+    // M3：搜索会话缓存——打断扫描后已得结果保留，重开弹窗可见。
+    // M3.4：searchHits 整体替换（不可变快照）+ 会话令牌——过期线程的 UI 更新被丢弃，
+    // 修复"本章搜索后不显示结果、重开才显示"（旧线程收尾 post 覆盖/竞态）
+    private var searchHits: List<SearchHit> = emptyList()
     private var searchCancelled = false
-    private var searchThread: Thread? = null
+    private var searchSession = 0
+    private var searchPool: java.util.concurrent.ExecutorService? = null
 
     /** 搜索弹窗：正则（恒启用）+ 全书/当前章扫描 + Reasily 式按章聚合结果 + 点击跳转高亮 */
     private fun showSearch(prefill: String? = null) {
@@ -1143,55 +1190,83 @@ class BookActivity : Activity() {
                 Toast.makeText(this, "无效正则：${e.message}", Toast.LENGTH_SHORT).show()
                 return
             }
-            searchThread?.interrupt() // 上一次扫描若在跑，先打断
-            searchHits.clear()
-            rebuild(); searchAdapter.notifyDataSetChanged()
+            // M3.4：会话令牌——每次搜索新会话，旧线程的 UI 回报按令牌丢弃；
+            // 上一线程池 shutdownNow 打断扫描（不再用裸 interrupt 单线程）
+            val session = ++searchSession
+            searchPool?.shutdownNow()
             searchCancelled = false
             val book = epub ?: return
             val total = book.spine.size
             val from = if (scopeAll) 0 else spineIndex.coerceIn(0, total - 1)
             val until = if (scopeAll) total else from + 1
-            searchThread = Thread {
-                loop@ for (i in from until until) {
-                    if (searchCancelled || Thread.currentThread().isInterrupted) break@loop
-                    if (searchHits.size >= 500) break@loop
-                    val bytes = try {
-                        archive?.entryBytes(book.spine[i].path)
-                    } catch (_: Exception) {
-                        null
-                    } ?: continue
-                    val html = String(bytes, ZipPaths.detectCharset(bytes))
-                    var ei = 0
-                    for (m in blockRe.findAll(html)) {
-                        if (searchCancelled || Thread.currentThread().isInterrupted || searchHits.size >= 500) break@loop
-                        val text = visibleText(m.groupValues[3])
-                        if (text.isEmpty()) { ei++; continue }
-                        val mm = re.find(text)
-                        if (mm != null) {
-                            val s = (mm.range.first - 24).coerceAtLeast(0)
-                            val e2 = (mm.range.last + 25).coerceAtMost(text.length)
-                            val snip = ((if (s > 0) "…" else "") + text.substring(s, e2) +
-                                (if (e2 < text.length) "…" else "")).replace("\n", " ")
-                            searchHits.add(SearchHit(i, ei, snip, q, true))
-                        }
-                        ei++
-                    }
-                    // M3：每章扫完立即聚合显示（不等全书）
-                    val done = i - from + 1
-                    val found = searchHits.size
-                    ui.post {
-                        rebuild()
-                        searchAdapter.notifyDataSetChanged()
-                        status.text = getString(R.string.search_progress, done, until - from, found)
-                    }
+            if (from >= until) return
+            rebuild(); searchAdapter.notifyDataSetChanged() // 清空旧列表（含本次范围提示）
+            val collected = java.util.Collections.synchronizedList(ArrayList<SearchHit>())
+            val doneCount = java.util.concurrent.atomic.AtomicInteger(0)
+            // 纯文本查询快路径：不含正则元字符时用 lowercase indexOf（比 Regex 快数倍）
+            val isPlain = !Regex("""[\\\.\[\]\{\}\(\)\*\+\?\^\$\|]""").containsMatchIn(q)
+            val qLower = q.lowercase()
+            fun refresh(final: Boolean) {
+                val snapshot = synchronized(collected) {
+                    collected.sortedWith(compareBy({ it.spineIndex }, { it.elemIndex }))
                 }
-                val found = searchHits.size
                 ui.post {
+                    if (session != searchSession || searchCancelled) return@post // 过期会话：丢弃
+                    searchHits = snapshot
                     rebuild()
                     searchAdapter.notifyDataSetChanged()
-                    status.text = getString(R.string.search_done, found)
+                    status.text = if (final) getString(R.string.search_done, snapshot.size)
+                    else getString(R.string.search_progress, doneCount.get(), until - from, snapshot.size)
                 }
-            }.also { it.start() }
+            }
+            // M3.4：Reasily 式并发扫描——章节分片给固定线程池，多核并行解压+正则
+            val nThreads = minOf(3, until - from)
+            val pool = java.util.concurrent.Executors.newFixedThreadPool(nThreads)
+            searchPool = pool
+            val per = (until - from + nThreads - 1) / nThreads
+            val active = java.util.concurrent.atomic.AtomicInteger(nThreads)
+            var start = from
+            while (start < until) {
+                val end = minOf(start + per, until)
+                val range = start until end
+                start = end
+                pool.submit {
+                    try {
+                        for (i in range) {
+                            if (searchCancelled || Thread.currentThread().isInterrupted || collected.size >= 500) break
+                            val bytes = try {
+                                archive?.entryBytes(book.spine[i].path)
+                            } catch (_: Exception) {
+                                null
+                            } ?: continue
+                            val html = String(bytes, ZipPaths.detectCharset(bytes))
+                            var ei = 0
+                            for (m in blockRe.findAll(html)) {
+                                if (searchCancelled || Thread.currentThread().isInterrupted || collected.size >= 500) break
+                                val text = visibleText(m.groupValues[3])
+                                if (text.isEmpty()) { ei++; continue }
+                                val mm: IntRange? = if (isPlain) {
+                                    val idx = text.lowercase().indexOf(qLower)
+                                    if (idx >= 0) IntRange(idx, idx + q.length - 1) else null
+                                } else re.find(text)?.range
+                                if (mm != null) {
+                                    val s = (mm.first - 24).coerceAtLeast(0)
+                                    val e2 = (mm.last + 25).coerceAtMost(text.length)
+                                    val snip = ((if (s > 0) "…" else "") + text.substring(s, e2) +
+                                        (if (e2 < text.length) "…" else "")).replace("\n", " ")
+                                    collected.add(SearchHit(i, ei, snip, q, true))
+                                }
+                                ei++
+                            }
+                            doneCount.incrementAndGet()
+                            refresh(final = false) // 每章扫完立即聚合显示
+                        }
+                    } finally {
+                        // 最后一个分片完成 → 收尾刷新（一次性）
+                        if (active.decrementAndGet() == 0) refresh(final = true)
+                    }
+                }
+            }
         }
         et.setOnEditorActionListener { _, actionId, _ ->
             if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH) { runSearch(); true } else false
@@ -1241,7 +1316,14 @@ class BookActivity : Activity() {
             ?: book.spine.getOrNull(i)?.href?.substringAfterLast('/') ?: ""
     }
 
-    /** 点击搜索结果：重建目标章 HTML，为命中块元素注入 id="srch0" + <mark> 高亮，Frag 锚点跳转 */
+    /** 点击搜索结果：为命中块注入 data-srch0 + <mark> 高亮，Frag 锚点跳转。
+     *  M3.3：命中块若在渲染时被隐藏（aside 注释内 / epub:type=note 系 / id 为注释目标）：
+     *  1) 定位到正文中引用该注释的标记（noteref）所在块——找不到引用者则保持原页；
+     *  2) 提取注释块 HTML（命中词加 mark）→ 章节渲染完成后自动弹出注释层（showFootnote）；
+     *  3) 绝不展开注释进正文流——0.4.13 的展开方案会放大版面、污染页码与进度。
+     *  注入一律用 data-srch0 属性并【保留原 id】（剥 id 会破坏 markedHtml 隐藏规则）。
+     *  ⚠️ lastIndexOf 判定 aside 嵌套必须省略 startIndex（默认全串向左搜）——
+     *  传 startIndex=0 是 JVM「只查位置 0」语义，导致 inAside 恒 false（0.4.13 bug）。 */
     private fun jumpToSearchHit(h: SearchHit) {
         val book = epub ?: return
         val item = book.spine.getOrNull(h.spineIndex) ?: return
@@ -1259,30 +1341,111 @@ class BookActivity : Activity() {
             if (bytes == null) return@Thread
             val charset = ZipPaths.detectCharset(bytes)
             val html = String(bytes, charset)
-            val sb = StringBuilder()
-            var last = 0
-            var idx = -1
-            var done = false
-            for (m in blockRe.findAll(html)) {
-                idx++
-                if (idx == h.elemIndex) {
-                    sb.append(html, last, m.range.first)
-                    val attrs = m.groupValues[2]
-                        .replace(Regex("\\sid\\s*=\\s*(\"[^\"]*\"|'[^']*'|\\S+)"), " ")
-                    val inner = if (re != null) markSrchText(m.groupValues[3], re) else m.groupValues[3]
-                    sb.append('<').append(m.groupValues[1]).append(attrs).append(" id=\"srch0\">")
-                        .append(inner).append("</").append(m.groupValues[1]).append('>')
-                    last = m.range.last + 1
-                    done = true
-                    break
+            // 内部锚引用目标 id（与 doLoad markedHtml 规则2 同逻辑，用于隐藏判定）
+            val selfName = item.path.substringAfterLast('/')
+            val refIds = HashSet<String>()
+            Regex("(?i)href\\s*=\\s*[\"']([^\"']*)[\"']").findAll(html).forEach { m2 ->
+                val href = m2.groupValues[1]
+                val i = href.indexOf('#')
+                if (i >= 0 && href.length > i + 1) {
+                    val file = href.substring(0, i).substringAfterLast('/')
+                    if (file.isEmpty() || file.equals(selfName, ignoreCase = true)) {
+                        val frag = href.substring(i + 1)
+                        refIds += try {
+                            java.net.URLDecoder.decode(frag, "UTF-8")
+                        } catch (_: Exception) {
+                            frag
+                        }
+                    }
                 }
             }
-            if (!done) {
+            val fnTypes = hashSetOf("footnote", "note", "endnote", "rearnote")
+            val etypeAttrRe = Regex("(?i)\\sepub:type\\s*=\\s*[\"']([^\"']*)[\"']")
+            val idAttrRe = Regex("(?i)\\bid\\s*=\\s*[\"']?([^\"'\\s>/]+)")
+            val blocks = blockRe.findAll(html).toList()
+            val b = blocks.getOrNull(h.elemIndex)
+            if (b == null) {
                 ui.post { loadSpine(h.spineIndex, Anchor.First) } // 结构变化兜底：跳章首
                 return@Thread
             }
-            sb.append(html, last, html.length)
-            pendingSrchHtml[h.spineIndex] = Pair(sb.toString(), charset.name())
+            fun decodeFrag(f: String): String = try {
+                java.net.URLDecoder.decode(f, "UTF-8")
+            } catch (_: Exception) {
+                f
+            }
+            // 命中块隐藏判定（lastIndexOf 省略 startIndex = 全串向左搜）
+            fun hiddenAt(pos: Int, attrs: String): Pair<Boolean, String?> {
+                val before = html.substring(0, pos)
+                val lastOpen = before.lastIndexOf("<aside", ignoreCase = true)
+                val lastClose = before.lastIndexOf("</aside", ignoreCase = true)
+                val inAside = lastOpen > lastClose
+                val asideId = if (inAside) idAttrRe.find(before.substring(lastOpen))?.groupValues[1] else null
+                val types = etypeAttrRe.find(attrs)?.groupValues[1]?.trim()?.lowercase()
+                    ?.split(Regex("\\s+")) ?: emptyList()
+                val ownId = idAttrRe.find(attrs)?.groupValues[1]
+                val hidden = types.any { it in fnTypes } || inAside || (ownId != null && ownId in refIds)
+                val targetId = ownId ?: asideId
+                return Pair(hidden, targetId)
+            }
+            fun injected(m: MatchResult, mark: Boolean, extra: String): String {
+                val inner = if (mark && re != null) markSrchText(m.groupValues[3], re) else m.groupValues[3]
+                return "<" + m.groupValues[1] + m.groupValues[2] + extra + " data-srch0>" +
+                    inner + "</" + m.groupValues[1] + ">"
+            }
+            var out: String? = null
+            val (hidden, targetId) = hiddenAt(b.range.first, b.groupValues[2])
+            if (!hidden) {
+                out = html.substring(0, b.range.first) + injected(b, mark = true, extra = "") +
+                    html.substring(b.range.last + 1)
+            } else {
+                // —— 命中在隐藏注释内：定位引用者 + 弹注（不改版面） ——
+                var ref: MatchResult? = null
+                if (targetId != null) {
+                    val hrefRe = Regex("(?i)href\\s*=\\s*[\"']([^\"']*)[\"']")
+                    for (m2 in blocks) {
+                        if (m2 == b) continue
+                        if (hiddenAt(m2.range.first, m2.groupValues[2]).first) continue
+                        val has = hrefRe.findAll(m2.groupValues[3]).any { m3 ->
+                            val href = m3.groupValues[1]
+                            val hi = href.indexOf('#')
+                            if (hi < 0 || hi + 1 >= href.length) false
+                            else {
+                                val file = href.substring(0, hi).substringAfterLast('/')
+                                (file.isEmpty() || file.equals(selfName, ignoreCase = true)) &&
+                                    decodeFrag(href.substring(hi + 1)) == targetId
+                            }
+                        }
+                        if (has) {
+                            ref = m2
+                            break
+                        }
+                    }
+                }
+                // 提取注释块 HTML（aside 整块或命中块自身），命中词加 mark——弹层内高亮
+                val fnHtml: String = run {
+                    val before = html.substring(0, b.range.first)
+                    val lastOpen = before.lastIndexOf("<aside", ignoreCase = true)
+                    val lastClose = before.lastIndexOf("</aside", ignoreCase = true)
+                    if (lastOpen > lastClose) {
+                        Regex("(?is)<aside\\b.*?</aside\\s*>").find(html, lastOpen)?.value ?: b.value
+                    } else b.value
+                }
+                pendingFnHtml = if (re != null) markSrchText(fnHtml, re) else fnHtml
+                out = if (ref != null) {
+                    // 定位到正文引用块；ref 之后的内容全部保留（含被命中的注释块）——
+                    // 0.4.14 曾把注释块从 HTML 移除，导致点〔N〕标记弹出残缺注释/内容丢失
+                    html.substring(0, ref.range.first) + injected(ref, mark = true, extra = "") +
+                        html.substring(ref.range.last + 1)
+                } else null
+            }
+            if (out == null) {
+                // 无引用者（或无需注入）：保持原页（同章）/章首（跨章），仅弹注
+                val anchor2 = if (h.spineIndex == spineIndex && curTotal > 0) Anchor.Page(curPage) else Anchor.First
+                pendingSrchHtml.remove(h.spineIndex)
+                ui.post { loadSpine(h.spineIndex, anchor2) }
+                return@Thread
+            }
+            pendingSrchHtml[h.spineIndex] = Pair(out, charset.name())
             ui.post { loadSpine(h.spineIndex, Anchor.Frag("srch0")) }
         }.start()
     }
@@ -1310,6 +1473,8 @@ class BookActivity : Activity() {
     private val entNumRe = Regex("&#(x?)([0-9a-fA-F]+);")
 
     private fun visibleText(inner: String): String {
+        // M3.4 提速：纯文本块（无标签无实体，大量正文短块）直接返回，跳过 5 趟正则
+        if ('<' !in inner && '&' !in inner) return inner
         val stripped = inner
             .replace(Regex("(?is)<(script|style)[\\s\\S]*?</\\1>"), " ")
             .replace(Regex("(?is)</?([a-zA-Z][a-zA-Z0-9]*)[^>]*>")) { m ->
@@ -2290,6 +2455,10 @@ class BookActivity : Activity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        searchCancelled = true
+        searchSession++ // 使所有在途回报过期
+        searchPool?.shutdownNow()
+        searchPool = null
         runCatching { archive?.close() }
         archive = null
         closeImgOverlay()
