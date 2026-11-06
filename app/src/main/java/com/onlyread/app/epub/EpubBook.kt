@@ -38,5 +38,8 @@ data class EpubBook(
     val coverPath: String?,    // zip 内封面图片路径
     val spine: List<EpubSpineItem>,
     val toc: List<TocEntry> = emptyList(),
-    val navPath: String? = null // M3：EPUB3 NAV（目录文件）zip 内路径——不作为正文渲染
+    val navPath: String? = null, // M3：EPUB3 NAV（目录文件）zip 内路径——不作为正文渲染
+    // M3.5：Reasily 式——全部目录页路径集合（manifest 标记 nav 的所有文件 + 文件名/内容
+    // 启发式认定的目录页），阅读流与目录 UI 一律跳过；覆盖 properties 缺失的不规范 EPUB
+    val navPaths: Set<String> = emptySet()
 )

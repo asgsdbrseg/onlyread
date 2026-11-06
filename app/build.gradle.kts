@@ -11,8 +11,8 @@ android {
         applicationId = "com.onlyread.app"
         minSdk = 31          // 决策 #13：最低支持 Android 12
         targetSdk = 35
-        versionCode = 31
-        versionName = "0.4.15-m3"
+        versionCode = 33
+        versionName = "0.4.17-m3"
     }
 
     // CI 签名：GitHub Actions 将密钥解码为 app/keystore.jks，凭据经环境变量注入
@@ -58,5 +58,9 @@ android {
 
 // M0 架构精简：零外部依赖（纯 Android 框架 + Kotlin 标准库），
 // 数据层为框架 SQLiteOpenHelper（见 data/BooksDb.kt），慢网络环境下 Gradle 构建也极快。
+// testImplementation 仅用于 ReaderHtmlTest / EpubArchiveTest（纯 JVM JUnit4），不进入 APK、不影响手工构建。
+// kxml2 为 JVM 侧 XmlPullParser 实现（Android 框架自带，测试需要显式提供）。
 dependencies {
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("net.sf.kxml:kxml2:2.3.0")
 }

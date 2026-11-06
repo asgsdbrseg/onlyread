@@ -137,12 +137,57 @@ class EpubArchive(file: File) : Closeable {
                         (it.id.equals("cover-image", true) || it.id.equals("cover", true) || it.href.contains("cover", true))
                 }
 
-        val toc = parseToc(manifest, opfDir, spine)
-        // M3：EPUB3 NAV（目录文件）路径——正文加载时跳过，不在阅读流中显示目录内容
-        val navPath = manifest.values.firstOrNull {
+        // M3.5：Reasily 式——全部目录页集合。
+        // 1) manifest properties 含 "nav" 的所有 XHTML 文件（EPUB3 规范标记，可能不止一个：
+        //    toc / landmarks / page-list 常被制作成多个 nav）；
+        // 2) 启发式兜底：properties 缺失的不规范书——文件名含 toc/nav/contents/catalog
+        //    且内容含 nav 语义标记（epub:type="toc" / <nav id="toc"> 等）才认定，避免误伤正文。
+        val navMarked = manifest.values.filter {
             (it.properties?.split(' ')?.contains("nav") == true) &&
                 (it.mediaType.contains("xhtml") || it.mediaType == "text/html")
-        }?.let { ZipPaths.join(opfDir, ZipPaths.decode(it.href)) }
+        }
+        val navPath = navMarked.firstOrNull()?.let { ZipPaths.join(opfDir, ZipPaths.decode(it.href)) }
+        val navPaths = LinkedHashSet<String>().apply { navMarked.forEach { add(ZipPaths.join(opfDir, ZipPaths.decode(it.href))) } }
+        if (navPaths.isEmpty()) {
+            // 启发式：仅在文件名命中时才读内容确认（每书至多几次 8KB 读取）
+            val nameRe = Regex("(?i)(toc|nav|contents|catalog)")
+            val navContentRe = Regex(
+                "(?i)epub:type\\s*=\\s*[\"']toc[\"']" +
+                    "|<nav[^>]*id\\s*=\\s*[\"'](toc|nav)[\"']" +
+                    "|<nav[^>]*class\\s*=\\s*[\"'][^\"']*(toc|nav)"
+            )
+            spine.forEach { s ->
+                val name = s.href.substringAfterLast('/')
+                if (nameRe.containsMatchIn(name) &&
+                    (name.endsWith(".xhtml", true) || name.endsWith(".html", true) || name.endsWith(".htm", true)) &&
+                    s.path !in navPaths
+                ) {
+                    val confirmed = findEntry(s.path)?.let { e ->
+                        try {
+                            zip.getInputStream(e).use { ins ->
+                                val buf = ByteArray(8192)
+                                var n = 0
+                                while (n < buf.size) { // read 可能分次返回，读满/读完为止
+                                    val r = ins.read(buf, n, buf.size - n)
+                                    if (r <= 0) break
+                                    n += r
+                                }
+                                if (n > 0) navContentRe.containsMatchIn(String(buf, 0, n, Charsets.UTF_8)) else false
+                            }
+                        } catch (_: Exception) {
+                            false
+                        }
+                    } ?: false
+                    if (confirmed) navPaths.add(s.path)
+                }
+            }
+        }
+        // M3.6：解析期即从 spine 剔除全部目录页（Reasily 式）——目录页永不进入正文流；
+        // ⚠️ 必须在 parseToc 之前剔除，使 TOC 条目的 spineIndex 与剔除后的 spine 对齐
+        // （目录跳转/进度/搜索的章序号均为剔除后体系）。navPath/navPaths 仍保留，
+        // loadSpine 的运行时跳过逻辑作为防御性兜底。
+        val spineReading = spine.filter { it.path !in navPaths }
+        val toc = parseToc(manifest, opfDir, spineReading)
 
         return EpubBook(
             title = title,
@@ -151,9 +196,10 @@ class EpubArchive(file: File) : Closeable {
             publisher = publisher,
             opfDir = opfDir,
             coverPath = cover?.let { ZipPaths.join(opfDir, ZipPaths.decode(it.href)) },
-            spine = spine,
+            spine = spineReading, // M3.6：已剔除目录页的阅读流 spine
             toc = toc,
-            navPath = navPath
+            navPath = navPath,
+            navPaths = navPaths
         )
     }
 

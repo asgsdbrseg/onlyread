@@ -51,7 +51,7 @@ object ReaderPrefs {
 
     // M2.2：全局排版（所有书共享；0/0/''=书内默认）
     // M3：默认字号 20px（原来 0=书内默认）
-    fun fontSize(c: Context): Int = sp(c).getInt("font_px", 20)
+    fun fontSize(c: Context): Int = sp(c).getInt("font_px", 22) // M3.6：默认 20 → 22
     fun setFontSize(c: Context, v: Int) = sp(c).edit().putInt("font_px", v).apply()
 
     // M3：默认行距 1.5（原来 0=书内默认）

@@ -154,15 +154,25 @@ class BookActivity : Activity() {
               __apply();__report();};
             function __recompute(){__meas();if(__r.page>=__r.total){__go(__r.total-1);return;}__report();}
             // M3.3：进度恢复后按锚重定位——首次 __initReader 定位发生在自定义字体
-            // 加载完成前，布局漂移会让恢复位置偏差一页；fonts.ready 后重算锚页并纠正
+            // 加载完成前，布局漂移会让恢复位置偏差一页；fonts.ready 后重算锚页并纠正。
+            // ⚠️ 修复：搜索跳转（frag/data-srch0）此前无重定位分支，字体就绪后版面变化
+            // 导致落地页比正确页码【少两三页】；现补 frag 分支统一重算并纠正。
             function __reanchor(){if(!window.__initAnchor||window.__touched||!window.__initDone)return;
-              var a=window.__initAnchor;
+              __meas();var a=window.__initAnchor;
               if(a.elem!==undefined&&a.elem!==null&&a.elem>=0){
                 var p2=__pageOfElem(a.elem);
                 if(p2>=0&&p2!==__r.page)__go(p2);}
               else if(a.frac!==undefined&&a.frac!==null){
                 var p3=Math.round(a.frac*(__r.total-1));
-                if(p3>=0&&p3!==__r.page)__go(p3);}}
+                if(p3>=0&&p3!==__r.page)__go(p3);}
+              else if(a.frag!==undefined&&a.frag!==null){
+                var fe=null;try{fe=document.querySelector('[data-srch0]');}catch(e){}
+                if(!fe){try{fe=document.getElementById(a.frag);}catch(e){}}
+                if(fe){var fr=fe.getBoundingClientRect();
+                  var fx=fr.left+__r.page*__r.W;
+                  var p4=Math.floor((fx-__r.M)/__r.W);
+                  if(!(p4>=0))p4=0;if(p4>__r.total-1)p4=__r.total-1;
+                  if(p4!==__r.page)__go(p4);}}}
             window.__initReader=function(W,G,Mx,anchor,Vx,Bx){__r.W=W||0;__r.G=G||0;__r.M=Mx||0;__r.V=Vx||34;__r.B=Bx||0;__meas();
               window.__initAnchor=anchor||null;window.__touched=false;window.__initDone=false;
               var de=document.documentElement;de.scrollLeft=0;de.scrollTop=0;
@@ -618,6 +628,9 @@ class BookActivity : Activity() {
             null
         }
         ui.post {
+            // 打开大书/复杂书时先给一条加载反馈，避免 WebView 渲染前的空白等待期毫无响应
+            bottomBar.visibility = View.VISIBLE
+            bottomBar.text = getString(R.string.opening)
             if (p != null && epub != null && epub!!.spine.isNotEmpty()) {
                 val si = p.spineIndex.coerceIn(0, epub!!.spine.size - 1)
                 loadSpine(si, if (p.elemOrdinal >= 0) Anchor.Elem(p.elemOrdinal, p.pageIndex) else Anchor.Page(p.pageIndex))
@@ -654,11 +667,12 @@ class BookActivity : Activity() {
     private fun loadSpine(index: Int, anchor: Anchor) {
         val arch = archive ?: return
         val book = epub ?: return
-        // M3：EPUB3 NAV（目录文件）不作为正文渲染——任何入口（打开/目录/翻页）命中即顺延到下一章
-        val nav = book.navPath
-        if (nav != null && book.spine.getOrNull(index)?.path == nav) {
+        // M3：EPUB3 NAV（目录文件）不作为正文渲染——任何入口（打开/目录/翻页）命中即顺延到下一章。
+        // M3.5：Reasily 式——navPaths 为全部目录页集合（多 nav + 不规范书启发式识别），一并不渲染
+        val navs = book.navPaths.ifEmpty { book.navPath?.let { setOf(it) } ?: emptySet() }
+        if (book.spine.getOrNull(index)?.path in navs) {
             var j = index
-            while (j < book.spine.size && book.spine[j].path == nav) j++
+            while (j < book.spine.size && book.spine[j].path in navs) j++
             if (j < book.spine.size && j != index) {
                 loadSpine(j, Anchor.First)
                 return
@@ -667,26 +681,29 @@ class BookActivity : Activity() {
         if (index < 0 || index >= book.spine.size) return
         val item = book.spine[index]
         Thread {
-            // M3：搜索高亮注入的章节内容优先（用后即弃）
+            // 优先使用搜索高亮注入的章节内容（用后即弃）；否则从 zip 解压原文
             val ov = pendingSrchHtml.remove(index)
-            if (ov != null) {
-                ui.post { awaitLayout { doLoad(index, anchor, item.path, ov.first, ov.second) } }
-                return@Thread
-            }
-            val bytes = try {
-                arch.entryBytes(item.path)
-            } catch (_: Exception) {
-                null
-            }
-            if (bytes == null) {
-                ui.post {
-                    Toast.makeText(this@BookActivity, "章节内容缺失：${item.href}", Toast.LENGTH_SHORT).show()
+            val (rawHtml, charset) = if (ov != null) {
+                Pair(ov.first, ov.second)
+            } else {
+                val bytes = try {
+                    arch.entryBytes(item.path)
+                } catch (_: Exception) {
+                    null
                 }
-                return@Thread
+                if (bytes == null) {
+                    ui.post {
+                        Toast.makeText(this@BookActivity, "章节内容缺失：${item.href}", Toast.LENGTH_SHORT).show()
+                    }
+                    return@Thread
+                }
+                val cs = ZipPaths.detectCharset(bytes)
+                Pair(String(bytes, cs), cs.name())
             }
-            val charset = ZipPaths.detectCharset(bytes)
-            val html = String(bytes, charset)
-            ui.post { awaitLayout { doLoad(index, anchor, item.path, html, charset.name()) } }
+            // ⚠️ 繁重标记（多趟正则，大书/复杂书可达数百毫秒）放到后台线程：
+            // 主线程只负责 geometry（廉价）+ loadDataWithBaseURL，打开/跳转不再冻结、空白期大幅缩短
+            val markedHtml = ReaderHtml.markChapterForReader(rawHtml, item.path)
+            ui.post { awaitLayout { doLoad(index, anchor, item.path, markedHtml, charset) } }
         }.start()
     }
 
@@ -708,7 +725,7 @@ class BookActivity : Activity() {
         }
     }
 
-    private fun doLoad(index: Int, anchor: Anchor, itemPath: String, html: String, charset: String) {
+    private fun doLoad(index: Int, anchor: Anchor, itemPath: String, markedHtml: String, charset: String) {
         val book = epub ?: return
         if (index < 0 || index >= book.spine.size) return
         val density = resources.displayMetrics.density
@@ -750,81 +767,12 @@ class BookActivity : Activity() {
         val script = "<script>" + INIT_JS +
             "window.onerror=function(m,s,l){try{ReaderBridge.onJsError(String(m)+'@'+l);}catch(e){}}" +
             "</script>"
-        // M3：Kotlin 侧标记正文注释块（0.4.6/0.4.7 的 JS 标记因选择器字符串损坏未生效，弃用）。
-        // 1) aside 与 epub:type=footnote/note/endnote/rearnote 直接标记；
-        // 2) 收集本文件内部锚引用（href="#x" 与 href="本文件名#x"）的目标 id，
-        //    目标元素开标签注入 data-fnhide——注释内容仍在 DOM，弹窗可取。
-        val markedHtml = run {
-            var h = html.replace(Regex("(?i)<aside([^>]*)>"), "<aside data-fnhide$1>")
-            // M3.1：epub:type 精确值匹配（按空格 split 判断）——防止 "noteref" 含 "note"
-            // 子串被误隐藏（EPUB3 标准 noteref 引用标记必须保留可见、可点击弹注）
-            val fnTypes = hashSetOf("footnote", "note", "endnote", "rearnote")
-            val etypeRe = Regex("(?i)<([a-zA-Z][a-zA-Z0-9]*)((?:\\s[^>]*)?)>")
-            val etypeAttrRe = Regex("(?i)\\sepub:type\\s*=\\s*[\"']([^\"']*)[\"']")
-            val sb2 = StringBuilder()
-            var last2 = 0
-            for (m in etypeRe.findAll(h)) {
-                val attrs = m.groupValues[2]
-                val em = etypeAttrRe.find(attrs) ?: continue
-                val types = em.groupValues[1].trim().lowercase().split(Regex("\\s+"))
-                if (types.none { it in fnTypes }) continue // noteref / other → 不隐藏
-                if (attrs.contains("data-fnhide")) continue
-                sb2.append(h, last2, m.range.first)
-                sb2.append('<').append(m.groupValues[1]).append(" data-fnhide").append(attrs).append('>')
-                last2 = m.range.last + 1
-            }
-            sb2.append(h.substring(last2))
-            h = sb2.toString()
-            val selfName = itemPath.substringAfterLast('/')
-            val refIds = HashSet<String>()
-            Regex("""href\s*=\s*["']([^"']*)["']""", RegexOption.IGNORE_CASE).findAll(html).forEach { m ->
-                val href = m.groupValues[1]
-                val i = href.indexOf('#')
-                if (i >= 0 && href.length > i + 1) {
-                    val file = href.substring(0, i).substringAfterLast('/')
-                    if (file.isEmpty() || file.equals(selfName, ignoreCase = true)) {
-                        refIds += try {
-                            java.net.URLDecoder.decode(href.substring(i + 1), "UTF-8")
-                        } catch (_: Exception) {
-                            href.substring(i + 1)
-                        }
-                    }
-                }
-            }
-            if (refIds.isNotEmpty()) {
-                // M3.1：只标记块级目标——回链指向的正文引用锚（行内 <a id="refN">）不隐藏；
-                // body/head 绝不标记（防止整页消失）
-                val blockTags = hashSetOf(
-                    "p", "div", "li", "ul", "ol", "blockquote", "dd", "dt", "dl", "td", "th", "tr",
-                    "section", "article", "table", "figure", "figcaption", "main", "pre",
-                    "header", "footer", "address", "details", "summary", "fieldset", "form", "caption"
-                )
-                val tagRe = Regex("""<([a-zA-Z][a-zA-Z0-9]*)((?:\s[^>]*)?)>""")
-                val idRe = Regex("""\bid\s*=\s*["']?([^"'\s>/]+)""")
-                val sb = StringBuilder()
-                var last = 0
-                for (m in tagRe.findAll(h)) {
-                    val tag = m.groupValues[1].lowercase()
-                    if (tag == "body" || tag == "html" || tag == "head") continue
-                    if (tag !in blockTags) continue // 行内锚（引用标记）保持可见
-                    val attrs = m.groupValues[2]
-                    if (attrs.contains("data-fnhide")) continue
-                    val idv = idRe.find(attrs)?.groupValues?.get(1)
-                    if (idv != null && idv in refIds) {
-                        sb.append(h, last, m.range.first)
-                        sb.append('<').append(m.groupValues[1]).append(" data-fnhide").append(attrs).append('>')
-                        last = m.range.last + 1
-                    }
-                }
-                sb.append(h.substring(last))
-                h = sb.toString()
-            }
-            h
-        }
+        // 备注：markedHtml 已由后台线程的 ReaderHtml.markChapterForReader 生成（含 data-fnhide 标记与保留的 data-srch0）；
+        // 此处仅做廉价拼接注入，主线程不承受大正则开销。
         val full = injectHead(markedHtml, BASE_HEAD + themeCss() + typographyCss() + pagedCss + script)
 
         // 弹注样式来源：提取书籍自带 <head>（去脚本），注入发生在提取之后，不受污染
-        curHead = Regex("(?is)<head[^>]*>(.*?)</head>").find(html)?.groupValues?.get(1)
+        curHead = Regex("(?is)<head[^>]*>(.*?)</head>").find(markedHtml)?.groupValues?.get(1)
             ?.replace(Regex("(?is)<script[\\s\\S]*?</script>"), "") ?: ""
         curDir = itemPath.substringBeforeLast('/', "")
         val base = "https://$HOST/book/$bookId/" + if (curDir.isEmpty()) "" else "$curDir/"
@@ -926,10 +874,10 @@ class BookActivity : Activity() {
     private fun openToc() {
         // M3：弹注弹层跟随主界面菜单——主菜单打开时先收起弹注（避免叠层）
         if (fnPanel != null) closeFnPanel()
-        // M3：目录列表中排除 NAV（目录文件）自身条目——它不作为正文渲染
-        val nav = epub?.navPath
-        val navSpineIdx = if (nav != null) epub?.spine?.indexOfFirst { it.path == nav } ?: -1 else -1
-        val rows = if (navSpineIdx >= 0) toc.filter { it.spineIndex != navSpineIdx } else toc
+        // M3：目录列表中排除 NAV（目录文件）自身条目——它不作为正文渲染。
+        // M3.5：按 navPaths 全集过滤（多 nav/不规范书也排除）
+        val navs = epub?.navPaths?.ifEmpty { epub?.navPath?.let { setOf(it) } ?: emptySet() } ?: emptySet()
+        val rows = if (navs.isNotEmpty()) toc.filter { epub?.spine?.getOrNull(it.spineIndex)?.path !in navs } else toc
         if (rows.isEmpty()) {
             openSettings() // 无目录时中键直达阅读设置
             return
@@ -1057,9 +1005,7 @@ class BookActivity : Activity() {
 
     // ————— M3：全书搜索（正则，按章聚合） —————
 
-    /** 块元素扫描正则：group1=标签名 group2=属性 group3=内部 HTML（扫描与注入共用同一迭代序） */
-    private val blockRe: Regex =
-        Regex("(?is)<(p|li|blockquote|h[1-6]|dd|dt|div)\\b([^>]*)>(.*?)</\\1\\s*>")
+    // 块元素扫描正则在 ReaderHtml.BLOCK_PATTERN 统一定义（扫描与注入共用同一迭代序）
 
     private class SearchHit(
         val spineIndex: Int, val elemIndex: Int, val label: String,
@@ -1241,19 +1187,16 @@ class BookActivity : Activity() {
                             } ?: continue
                             val html = String(bytes, ZipPaths.detectCharset(bytes))
                             var ei = 0
-                            for (m in blockRe.findAll(html)) {
+                            for (m in ReaderHtml.BLOCK_PATTERN.findAll(html)) {
                                 if (searchCancelled || Thread.currentThread().isInterrupted || collected.size >= 500) break
-                                val text = visibleText(m.groupValues[3])
+                                val text = ReaderHtml.extractVisibleText(m.groupValues[3])
                                 if (text.isEmpty()) { ei++; continue }
                                 val mm: IntRange? = if (isPlain) {
                                     val idx = text.lowercase().indexOf(qLower)
                                     if (idx >= 0) IntRange(idx, idx + q.length - 1) else null
                                 } else re.find(text)?.range
                                 if (mm != null) {
-                                    val s = (mm.first - 24).coerceAtLeast(0)
-                                    val e2 = (mm.last + 25).coerceAtMost(text.length)
-                                    val snip = ((if (s > 0) "…" else "") + text.substring(s, e2) +
-                                        (if (e2 < text.length) "…" else "")).replace("\n", " ")
+                                    val snip = ReaderHtml.buildSnippet(text, mm)
                                     collected.add(SearchHit(i, ei, snip, q, true))
                                 }
                                 ei++
@@ -1362,8 +1305,19 @@ class BookActivity : Activity() {
             val fnTypes = hashSetOf("footnote", "note", "endnote", "rearnote")
             val etypeAttrRe = Regex("(?i)\\sepub:type\\s*=\\s*[\"']([^\"']*)[\"']")
             val idAttrRe = Regex("(?i)\\bid\\s*=\\s*[\"']?([^\"'\\s>/]+)")
-            val blocks = blockRe.findAll(html).toList()
-            val b = blocks.getOrNull(h.elemIndex)
+            // 惰性定位目标块：仅迭代到 h.elemIndex，不为超大章节物化成千上万个 MatchResult
+            val target = run {
+                var res: MatchResult? = null
+                var ei = 0
+                val it = ReaderHtml.BLOCK_PATTERN.findAll(html).iterator()
+                while (it.hasNext()) {
+                    val m = it.next()
+                    if (ei == h.elemIndex) { res = m; break }
+                    ei++
+                }
+                res
+            }
+            val b = target
             if (b == null) {
                 ui.post { loadSpine(h.spineIndex, Anchor.First) } // 结构变化兜底：跳章首
                 return@Thread
@@ -1402,8 +1356,9 @@ class BookActivity : Activity() {
                 var ref: MatchResult? = null
                 if (targetId != null) {
                     val hrefRe = Regex("(?i)href\\s*=\\s*[\"']([^\"']*)[\"']")
-                    for (m2 in blocks) {
-                        if (m2 == b) continue
+                    for (m2 in ReaderHtml.BLOCK_PATTERN.findAll(html)) {
+                        // 跳过目标块本身（两次 findAll 实例不同，改用区间相等判定，等价于原 m2==b）
+                        if (m2.range == b.range) continue
                         if (hiddenAt(m2.range.first, m2.groupValues[2]).first) continue
                         val has = hrefRe.findAll(m2.groupValues[3]).any { m3 ->
                             val href = m3.groupValues[1]
@@ -1458,50 +1413,8 @@ class BookActivity : Activity() {
             else re.replace(t) { mm -> "<mark class=\"__srch\">${mm.value}</mark>" }
         }
 
-    /** 行内标签：抽掉标签后文字应无缝拼接（跨 <u>/<span> 的词组可命中） */
-    private val inlineTags = setOf(
-        "a", "span", "u", "b", "i", "em", "strong", "sup", "sub", "small", "big",
-        "code", "cite", "q", "mark", "font", "s", "strike", "tt", "abbr", "bdi",
-        "bdo", "ruby", "rt", "rp", "time", "var", "kbd", "samp", "del", "ins",
-        "label", "br", "wbr"
-    )
-
-    /** 提取可见文本（M3 提速：不再逐块 Html.fromHtml——大书扫描的主瓶颈）：
-     *  行内标签移除（无缝拼接），块级标签换成换行（防止跨段落误配）；
-     *  命名与数字（十进制/十六进制）字符实体就地解码 */
-    private val entNameRe = Regex("&[a-zA-Z][a-zA-Z0-9]*;")
-    private val entNumRe = Regex("&#(x?)([0-9a-fA-F]+);")
-
-    private fun visibleText(inner: String): String {
-        // M3.4 提速：纯文本块（无标签无实体，大量正文短块）直接返回，跳过 5 趟正则
-        if ('<' !in inner && '&' !in inner) return inner
-        val stripped = inner
-            .replace(Regex("(?is)<(script|style)[\\s\\S]*?</\\1>"), " ")
-            .replace(Regex("(?is)</?([a-zA-Z][a-zA-Z0-9]*)[^>]*>")) { m ->
-                if (m.groupValues[1].lowercase() in inlineTags) "" else "\n"
-            }
-            .replace(entNameRe) { m ->
-                when (m.value.lowercase()) {
-                    "&nbsp;" -> " "
-                    "&amp;" -> "&"
-                    "&lt;" -> "<"
-                    "&gt;" -> ">"
-                    "&quot;" -> "\""
-                    "&apos;", "&#39;" -> "'"
-                    else -> " "
-                }
-            }
-            .replace(entNumRe) { m ->
-                val code = try {
-                    if (m.groupValues[1] == "x") m.groupValues[2].toInt(16) else m.groupValues[2].toInt()
-                } catch (_: Exception) {
-                    return@replace " "
-                }
-                if (code in 0x20..0xFFFF && !Character.isISOControl(code)) code.toChar().toString() else " "
-            }
-        // 仅塌缩空格类空白（含 NBSP），保留 \n 作为块边界
-        return stripped.replace(Regex("[ \t\n\u000B\u000C\r\u00A0]+"), " ").trim()
-    }
+    // 可见文本抽取（extractVisibleText）、行内标签判定（isInlineTag）、命中片段（buildSnippet）
+    // 与章节注释块标记（markChapterForReader）已迁移至 ReaderHtml 纯函数对象，便于后台线程执行与单元测试。
 
     // ————— M2：主题 / 沉浸式 / 排版 / 脚注 / 阅读设置 —————
 
