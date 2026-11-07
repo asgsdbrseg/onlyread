@@ -53,6 +53,8 @@
     <string name="search_progress">搜索中 %1$d/%2$d · 已找到 %3$d 条</string>
     <string name="search_done">搜索完成 · 共 %1$d 条（上限 500）</string>
     <string name="opening">打开中…</string>
+    <string name="toc_filter_hint">输入关键词过滤目录</string>
+    <string name="search_stopped">已停止 · 找到 %1$d 条</string>
     <string name="sel_copy">复制</string>
     <string name="sel_share">分享</string>
     <string name="sel_search">搜索</string>

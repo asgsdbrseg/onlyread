@@ -73,9 +73,11 @@ class BookActivity : Activity() {
         private const val PICK_FONT = 4201 // 字体选择请求码
         private const val M = 16 // 页内边距（CSS px）
         private const val V = 34 // 顶部预留高度（信息条），CSS px
+        // 图片排版完全交给书籍自带 CSS：不再注入 display:block / margin:auto / float:none
+        // 等强制居中规则（图片原先被强制块级化并水平居中，书籍 CSS 的对齐/浮动/文字环绕全部失效）。
+        // 仅保留表格基础样式；图片的尺寸保护放在 doLoad 的 pagedCss 中，不属于居中规则。
         private const val BASE_HEAD =
-            "<style>html,body{margin:0;padding:0;}img,svg{max-width:100%;" +
-                "display:block !important;margin-left:auto !important;margin-right:auto !important;float:none !important;}" +
+            "<style>html,body{margin:0;padding:0;}" +
                 "table{border-collapse:collapse;}td,th{padding:4px;}</style>"
 
         /** M2 三套主题色板：页面底色 / 正文 / 链接 / 信息条底 / 信息条字 */
@@ -228,6 +230,58 @@ class BookActivity : Activity() {
               var pg=(anchor!==undefined&&anchor!==null&&anchor>=0)?__pageOfElem(anchor):-1;
               if(pg<0)pg=Math.min(__r.page,__r.total-1);
               __go(pg);};
+            // —— 注释类链接判定（M2.3）——
+            // 只有 epub:type="noteref"（及等价写法）的链接才允许弹注；普通章节锚点、
+            // 目录/交叉引用、外链一律走 WebView 原生导航（跳章），绝不弹注释层。
+            // 兼容：XHTML 命名空间下的 epub:type、EPUB3 的 role="doc-noteref"、
+            // EPUB2 常见的 class="noteref"；属性值归一化后整词比对，避免 noteref-xxx 误命中。
+            // 兜底（M2.4）：全无标记属性的裸链接（古籍常见 <a href="#fn1">）——
+            // 同文档 href 指向 aside / epub:type 含 footnote|endnote 的目标时同样视为 noteref，
+            // 否则注释密集书（《莊子集釋》等）弹注整体失效。
+            function __isNoteRef(a){
+              if(!a||!a.getAttribute)return false;
+              var v='';
+              try{v=a.getAttribute('epub:type')||'';}catch(e){}
+              if(!v){try{v=(a.getAttributeNS&&a.getAttributeNS('http://www.idpf.org/2007/ops','type'))||'';}catch(e){}}
+              if(!v){try{v=a.getAttribute('role')||'';}catch(e){}}
+              if(!v){try{v=a.getAttribute('class')||'';}catch(e){}}
+              if(!v){try{v=a.getAttribute('type')||'';}catch(e){}}
+              if(!v){
+                var h=String(a.getAttribute('href')||'');
+                if(h.charAt(0)!=='#')return false;
+                var t=null;
+                try{t=document.getElementById(decodeURIComponent(h.slice(1)));}catch(e){}
+                if(!t){try{t=document.getElementById(h.slice(1));}catch(e){}}
+                if(!t)return false;
+                var tv='',tg=t.tagName||'';
+                try{tv=t.getAttribute('epub:type')||'';}catch(e){}
+                if(!tv){try{tv=(t.getAttributeNS&&t.getAttributeNS('http://www.idpf.org/2007/ops','type'))||'';}catch(e){}}
+                tv=String(tv).toLowerCase();
+                return tv.indexOf('footnote')>=0||tv.indexOf('endnote')>=0||tg==='ASIDE';
+              }
+              var t=' '+String(v).toLowerCase().replace(/[^a-z0-9-]+/g,' ')+' ';
+              return t.indexOf(' noteref ')>=0||t.indexOf(' doc-noteref ')>=0;
+            }
+            // 普通同文档锚点链接：按内容坐标换算页码翻页，不交给 WebView 原生锚点滚动
+            // （横向分栏 + transform 下原生滚动会把版面滚乱）。
+            window.__goFrag=function(id){
+              var el=null;
+              try{el=document.getElementById(decodeURIComponent(id));}catch(e){}
+              if(!el){try{el=document.getElementById(id);}catch(e){}}
+              if(!el)return false;
+              var r=el.getBoundingClientRect();
+              // 目标块可能被注释隐藏规则标记（data-fnhide）：现场解除，
+              // 否则 rect 全零算出的页码无意义，且跳过去也看不到内容
+              if(r.width<=0&&r.height<=0){var anc=el;
+                while(anc&&anc.nodeType===1){
+                  if(anc.getAttribute&&anc.getAttribute('data-fnhide')!==null){
+                    anc.removeAttribute('data-fnhide');__meas();r=el.getBoundingClientRect();break;}
+                  anc=anc.parentNode;}}
+              var x=r.left+__r.page*__r.W;
+              var pg=Math.floor((x-__r.M)/__r.W);
+              if(pg<0)pg=0;if(pg>__r.total-1)pg=__r.total-1;
+              __go(pg,1);return true;
+            };
             // 命中测试：优先注释标记/图片，未命中返回 none（由 Kotlin 决定翻页/呼出）
             window.__hitTest=function(x,y){
               var el=null;
@@ -236,10 +290,12 @@ class BookActivity : Activity() {
                 var tag=el.tagName;
                 if(tag==='A'){
                   var href=el.getAttribute('href')||'';
-                  // 跨文件脚注：note.xhtml#frag → 就地弹层（Kotlin 从目标文件提取节点）
+                  // 非注释类链接：一律不弹注。有 href 交 WebView 原生导航（Kotlin 侧不翻页），
+                  // 无 href 的锚点占位视为正文（照常翻页）。
+                  if(!__isNoteRef(el))return href?'link':'none';
+                  // 跨文件 noteref：note.xhtml#frag → 由 click 捕获监听器就地弹层并阻止原生导航；
+                  // 此处只返回 'fn' 抑制翻页，不再重复转发弹注
                   if(href&&href.indexOf('#')>=0&&href.charAt(0)!=='#'&&!/^(https?:|mailto:|tel:)/i.test(href)){
-                    var abs='';try{abs=new URL(href,document.baseURI).href;}catch(e){abs=href;}
-                    try{ReaderBridge.onCrossRef(String(abs));}catch(e){}
                     return 'fn';
                   }
                   if(href.charAt(0)==='#'){
@@ -251,6 +307,8 @@ class BookActivity : Activity() {
                       return 'fn';}
                     return 'fn-miss';
                   }
+                  // 无 # 的 noteref（目标为整篇注释文件）：同样只弹注、不跳章
+                  if(href&&!/^(https?:|mailto:|tel:)/i.test(href))return 'fn';
                   return 'link';
                 }
                 if(tag==='IMG'){
@@ -265,18 +323,20 @@ class BookActivity : Activity() {
               }
               return 'none';
             };
-            // 脚注：捕获同文档 # 锚点点击 → 弹层展示目标内容（跨文件链接仍走 Kotlin 跳章）
+            // 注释点击：仅 epub:type="noteref" 类链接就地弹层，绝不触发 WebView 原生导航。
+            // 非注释类链接（章节交叉引用、目录锚点、外链）不拦截，交 shouldOverrideUrlLoading
+            // 正常跳章/定位。同文档 # 锚点的注释内容由 __hitTest 转发（此处只阻止导航，
+            // 避免重复弹层）；跨文件 / 无锚点 noteref 交 Kotlin 从目标文件提取后弹层。
             document.addEventListener('click',function(e){
               var a=e.target;while(a&&a.nodeType===1&&a.tagName!=='A')a=a.parentNode;
               if(!a||a.nodeType!==1)return;
+              if(!__isNoteRef(a))return;
               var href=a.getAttribute('href')||'';
-              if(href.charAt(0)!=='#')return;
+              if(!href||/^(https?:|mailto:|tel:)/i.test(href))return;
               e.preventDefault();e.stopPropagation();
-              var id=href.substring(1),t=null;
-              try{t=document.getElementById(decodeURIComponent(id));}catch(err){}
-              if(!t){try{t=document.getElementById(id);}catch(err){}}
-              if(t){var s=t.innerHTML||t.textContent||'';
-                try{ReaderBridge.onFootnote(String(s).slice(0,8000));}catch(err){}}
+              if(href.charAt(0)==='#')return; // 同文档锚点：内容由 __hitTest 转发
+              var abs='';try{abs=new URL(href,document.baseURI).href;}catch(err){abs=href;}
+              try{ReaderBridge.onCrossRef(String(abs));}catch(err){}
             },true);
             // M3：长按选区上报（选择手柄拖动持续触发 selectionchange，防抖后回报文本+视口矩形）
             var __selT=null;
@@ -445,8 +505,14 @@ class BookActivity : Activity() {
                 if (u.host == HOST) {
                     val path = u.path ?: return true
                     val idx = spineIndexForPath(path)
-                    val samePage = u.fragment != null && idx == spineIndex
-                    if (samePage) return false
+                    val frag = u.fragment
+                    // 普通同文档锚点（非 noteref）：不再交 WebView 原生滚动，
+                    // 由 JS 按内容坐标把锚点换算成页码翻过去，避免横向分栏 + transform 下版面被滚乱。
+                    if (frag != null && idx == spineIndex) {
+                        val q = org.json.JSONObject.quote(frag)
+                        ui.post { runJs("try{window.__goFrag($q)}catch(e){false}") }
+                        return true
+                    }
                     if (idx >= 0) {
                         loadSpine(idx, Anchor.First)
                         return true
@@ -497,9 +563,10 @@ class BookActivity : Activity() {
         ) { hit ->
             when (hit?.trim()?.removeSurrounding("'")?.removeSurrounding("\"") ?: "none") {
                 "fn", "img" -> Unit          // 弹层已由 JS→Bridge 触发
+                "link" -> Unit               // 非注释类链接：交给 WebView 原生导航（跳章/锚点），不翻页
                 "fn-miss" -> Toast.makeText(this, R.string.footnote_empty, Toast.LENGTH_SHORT).show()
                 "img-miss" -> Toast.makeText(this, R.string.image_fail, Toast.LENGTH_SHORT).show()
-                else -> when (zone) {        // link/none：链接与正文都按翻页处理
+                else -> when (zone) {        // none：正文按翻页处理
                     "prev" -> prevPage()
                     "next" -> nextPage()
                     else -> openToc()
@@ -884,6 +951,7 @@ class BookActivity : Activity() {
         }
         // M3：多级目录自动折叠——初始只展开当前章节的各级父级；点击带子级的条目展开/收起
         val expanded = HashSet<Int>()
+        var filter = "" // 目录过滤关键词（非空时忽略折叠状态，只列标题命中的条目）
         fun expandAncestorsOf(target: Int) {
             var lv = rows[target].level
             for (i in target - 1 downTo 0) {
@@ -902,6 +970,10 @@ class BookActivity : Activity() {
         if (curTocIdx >= 0) expandAncestorsOf(curTocIdx)
         fun hasChildren(i: Int): Boolean = i + 1 < rows.size && rows[i + 1].level > rows[i].level
         fun visibleIdx(): List<Int> {
+            // 过滤模式：忽略折叠状态，只列标题命中的条目（缩进仍按 level 保留层级感）
+            if (filter.isNotEmpty()) {
+                return rows.indices.filter { rows[it].title.contains(filter, ignoreCase = true) }
+            }
             // level==0 恒可见；否则要求全部祖先都在 expanded 中
             val out = ArrayList<Int>()
             for (i in rows.indices) {
@@ -957,25 +1029,61 @@ class BookActivity : Activity() {
                     else getColor(R.color.text_main)
                 )
                 tv.setPadding(pad, 24, 12, 24)
-                if (hasChildren(idx)) {
+                if (filter.isEmpty() && hasChildren(idx)) {
                     caret.text = if (idx in expanded) "▾" else "▸"
                     caret.setTextColor(getColor(R.color.text_sub))
                     caret.setOnClickListener {
+                        if (filter.isNotEmpty()) return@setOnClickListener // 过滤态不参与折叠
                         if (idx in expanded) expanded.remove(idx) else expanded.add(idx)
                         visible.clear(); visible.addAll(visibleIdx())
                         notifyDataSetChanged() // 外层 BaseAdapter 自身
                     }
                     caret.visibility = View.VISIBLE
                 } else {
-                    caret.visibility = View.INVISIBLE // 占位对齐
+                    caret.visibility = View.INVISIBLE // 占位对齐（过滤态下也隐藏三角）
                 }
                 return row
             }
         }
         listView.adapter = adapter
+        val d = resources.displayMetrics.density
+        // 目录窗口几何：顶部固定（gravity TOP + 固定 y），底部随输入法上移；
+        // 列表高度由窗口高度驱动，过滤框与三个按钮始终留在可视区内
+        val screenH = resources.displayMetrics.heightPixels
+        val baseH = (screenH * 0.72f).toInt()
+        val topY = ((screenH - baseH) / 2f).toInt().coerceAtLeast(0)
+        val reserve = (200 * d).toInt() // 标题栏 + 按钮栏 + 过滤框 + 内边距
+        val minH = (320 * d).toInt()
+        val minListH = (100 * d).toInt()
+        val listLp = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, (baseH - reserve).coerceAtLeast(minListH)
+        )
+        val filterEt = android.widget.EditText(this).apply {
+            hint = getString(R.string.toc_filter_hint)
+            textSize = 14f
+            setSingleLine()
+            imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE
+            setPadding((12 * d).toInt(), (10 * d).toInt(), (12 * d).toInt(), (10 * d).toInt())
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            addTextChangedListener(object : android.text.TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                    filter = s?.toString()?.trim() ?: ""
+                    visible.clear(); visible.addAll(visibleIdx())
+                    adapter.notifyDataSetChanged()
+                }
+                override fun afterTextChanged(s: android.text.Editable?) {}
+            })
+        }
+        // 顺序：目录 → 过滤框 → AlertDialog 自带的三个按钮
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        box.addView(listView, listLp)
+        box.addView(filterEt)
         val dlg = AlertDialog.Builder(this, dialogTheme())
             .setTitle(R.string.toc_title)
-            .setView(listView)
+            .setView(box)
             .setPositiveButton(R.string.settings_title) { _, _ -> openSettings() }
             .setNeutralButton(R.string.search_title) { _, _ -> showSearch() }
             .setNegativeButton(R.string.action_cancel, null)
@@ -990,6 +1098,46 @@ class BookActivity : Activity() {
             dlg.dismiss()
         }
         dlg.show()
+        dlg.setCanceledOnTouchOutside(true)
+        dlg.window?.let { w ->
+            // ADJUST_NOTHING：系统既不平移也不缩放窗口，配合 gravity TOP + 固定 y，
+            // 保证输入法弹出前后「顶部不变」；窗口高度由下方逻辑主动压缩 → 底部上移
+            w.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
+            val a = w.attributes
+            a.gravity = android.view.Gravity.TOP
+            a.y = topY
+            a.height = baseH
+            w.attributes = a
+            var kb = 0 // 本次键盘弹起过程中的最大高度，避免窗口压缩后 insets 变小引起抖动
+            fun setTocHeight(h: Int) {
+                val wantList = (h - reserve).coerceAtLeast(minListH)
+                val cur = w.attributes
+                if (cur.height == h && listView.layoutParams.height == wantList) return
+                cur.height = h
+                w.attributes = cur
+                listView.layoutParams.height = wantList
+                listView.requestLayout()
+            }
+            fun applyTocHeight(k: Int) {
+                kb = maxOf(kb, k)
+                setTocHeight(minOf(baseH, (screenH - kb - topY).coerceAtLeast(minH)))
+            }
+            w.decorView.setOnApplyWindowInsetsListener { _, insets ->
+                if (insets.isVisible(WindowInsets.Type.ime())) {
+                    applyTocHeight(insets.getInsets(WindowInsets.Type.ime()).bottom)
+                } else {
+                    kb = 0
+                    setTocHeight(baseH)
+                }
+                insets
+            }
+            // 兜底：少数 ROM 在 ADJUST_NOTHING 下不分发 IME insets，
+            // 过滤框获焦时按常见键盘高度预估压缩，失焦时恢复
+            filterEt.setOnFocusChangeListener { _, hasFocus ->
+                if (hasFocus) applyTocHeight((screenH * 0.42f).toInt())
+                else { kb = 0; setTocHeight(baseH) }
+            }
+        }
         // M3：目录自动定位——当前章节滚到屏幕中部（列表不足一屏时 setSelectionFromTop 无副作用）
         if (curTocIdx >= 0) {
             val pos = visible.indexOf(curTocIdx)
@@ -1119,6 +1267,24 @@ class BookActivity : Activity() {
             }
         }
         lv.adapter = searchAdapter
+        // 搜索状态：开始扫描后「搜索」变「取消」（停止扫描），结束/停止后复原。
+        // Kotlin 局部函数需先声明，故状态与按钮引用放在 runSearch 之前。
+        var searching = false
+        var curCount = 0
+        var searchBtn: Button? = null
+        fun setSearching(b: Boolean) {
+            searching = b
+            searchBtn?.let { it.text = getString(if (b) R.string.action_cancel else R.string.search_btn) }
+        }
+        fun stopSearch() {
+            if (!searching) return
+            searchCancelled = true
+            searchSession++ // 使在途回报过期
+            searchPool?.shutdownNow()
+            searchPool = null
+            setSearching(false)
+            status.text = getString(R.string.search_stopped, curCount)
+        }
         box.addView(row)
         box.addView(status)
         box.addView(
@@ -1140,7 +1306,9 @@ class BookActivity : Activity() {
             // 上一线程池 shutdownNow 打断扫描（不再用裸 interrupt 单线程）
             val session = ++searchSession
             searchPool?.shutdownNow()
+            searchPool = null
             searchCancelled = false
+            curCount = 0
             val book = epub ?: return
             val total = book.spine.size
             val from = if (scopeAll) 0 else spineIndex.coerceIn(0, total - 1)
@@ -1158,17 +1326,20 @@ class BookActivity : Activity() {
                 }
                 ui.post {
                     if (session != searchSession || searchCancelled) return@post // 过期会话：丢弃
+                    curCount = snapshot.size
                     searchHits = snapshot
                     rebuild()
                     searchAdapter.notifyDataSetChanged()
                     status.text = if (final) getString(R.string.search_done, snapshot.size)
                     else getString(R.string.search_progress, doneCount.get(), until - from, snapshot.size)
+                    if (final) setSearching(false) // 扫描自然结束 → 按钮复原「搜索」
                 }
             }
             // M3.4：Reasily 式并发扫描——章节分片给固定线程池，多核并行解压+正则
             val nThreads = minOf(3, until - from)
             val pool = java.util.concurrent.Executors.newFixedThreadPool(nThreads)
             searchPool = pool
+            setSearching(true) // 扫描已启动 → 按钮切为「取消」
             val per = (until - from + nThreads - 1) / nThreads
             val active = java.util.concurrent.atomic.AtomicInteger(nThreads)
             var start = from
@@ -1218,13 +1389,14 @@ class BookActivity : Activity() {
             text = getString(R.string.search_btn)
             textSize = 13f
             isAllCaps = false
-            setOnClickListener { runSearch() }
+            setOnClickListener { if (searching) stopSearch() else runSearch() }
         }
+        searchBtn = btn
         row.addView(btn)
+        // 去掉底部「取消」按钮：关闭窗口靠点外部/返回键；停止搜索由上方按钮承担
         val dlg = AlertDialog.Builder(this, dialogTheme())
             .setTitle(R.string.search_title)
             .setView(box)
-            .setNegativeButton(R.string.action_cancel, null)
             .create()
         lv.setOnItemClickListener { _, _, pos, _ ->
             val item = rows.getOrNull(pos)
@@ -1233,8 +1405,15 @@ class BookActivity : Activity() {
                 jumpToSearchHit(item.hit)
             }
         }
-        dlg.setOnDismissListener { searchCancelled = true } // 打断扫描，但缓存结果不清除
+        dlg.setOnDismissListener {
+            searchCancelled = true // 打断扫描，但缓存结果不清除
+            searchPool?.shutdownNow()
+            searchPool = null
+        }
         dlg.show()
+        dlg.setCanceledOnTouchOutside(true) // 移除「取消」按钮后仍可点外部关闭
+        // 呼出输入法时窗口保持原位、不上移（Activity 已 adjustNothing，Dialog 需单独设置）
+        dlg.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
         dlg.window?.setLayout(
             ViewGroup.LayoutParams.MATCH_PARENT,
             (resources.displayMetrics.heightPixels * 0.80f).toInt()
@@ -1482,16 +1661,19 @@ class BookActivity : Activity() {
      *  嵌进块内会被当作 CSS 嵌套规则（老 WebView 甚至整条解析失败） */
     private fun typographyCss(): String {
         val htmlRule = if (fontPx > 0) "html{font-size:${fontPx}px !important;}" else ""
+        val famRules = fontFamilyRules("#__wrap")
         val parts = StringBuilder()
         if (fontPx > 0) parts.append("font-size:").append(fontPx).append("px !important;")
         if (lineH > 0) parts.append("line-height:").append(lineH).append(" !important;")
-        if (fontFam.isNotEmpty()) parts.append("font-family:").append(familyCss()).append(" !important;")
-        if (parts.isEmpty() && htmlRule.isEmpty()) return ""
-        // 只强制行距/字族继承；⚠️ 不强制 font-size——书籍对 p/li 等的 em/百分比相对字号
-        // （如 .jiao{font-size:.8em} 校注小字）必须保留，否则正文层级被拉平
-        return "<style>" + fontFaceCss() + htmlRule + "#__wrap{" + parts + "}" +
+        if (parts.isEmpty() && htmlRule.isEmpty() && famRules.isEmpty()) return ""
+        // 只强制行距继承；⚠️ 不强制 font-size——书籍对 p/li 等的 em/百分比相对字号
+        // （如 .jiao{font-size:.8em} 校注小字）必须保留，否则正文层级被拉平。
+        // 字族规则由 fontFamilyRules() 统一生成（含后代继承压制），与弹注同源。
+        return "<style>" + fontFaceCss() + htmlRule +
+            (if (parts.isNotEmpty()) "#__wrap{" + parts + "}" else "") +
+            famRules +
             "#__wrap p,#__wrap li,#__wrap blockquote,#__wrap dd,#__wrap dt,#__wrap pre{" +
-            "line-height:inherit !important;font-family:inherit !important;}</style>"
+            "line-height:inherit !important;}</style>"
     }
 
     /** M2.2：自定义字体的 @font-face（经拦截通道提供字体字节） */
@@ -1512,6 +1694,15 @@ class BookActivity : Activity() {
         "sans" -> "'Noto Sans CJK SC',sans-serif"
         else -> fontFam
     }
+
+    /** 字族规则单一来源：正文传 "#__wrap"，弹注传 "body"，两处不再各自维护口径。
+     *  font-family 可继承，但书籍 CSS 常对 p/span/li 显式指定字体（显式声明优先于继承），
+     *  故必须同时让全部后代继承，否则切成衬线/黑体后仍是书内字体。
+     *  @font-face 属文档级规则，由各文档自行调用 fontFaceCss() 注入，不在此重复。 */
+    private fun fontFamilyRules(selector: String): String =
+        if (fontFam.isEmpty()) ""
+        else selector + "{font-family:" + familyCss() + " !important;}" +
+            selector + " *{font-family:inherit !important;}"
 
     /** M2.2：页边距变更（上下左右独立）——重载当前章节并锚定原位置（边距参与分页 CSS，必须整页重排） */
     private fun applyMargins(l: Int, r: Int, t: Int, b: Int) {
@@ -1594,11 +1785,12 @@ class BookActivity : Activity() {
         (wv.parent as? ViewGroup)?.removeView(wv) // 复用前脱离上一次弹层的视图树
         val p = pal()
         val fnFontPx = ReaderPrefs.fnFont(this).coerceIn(10, 24)
-        val fnFamily = if (fontFam == "custom") familyCss() else "" // M2.2：自定义字体对弹注生效
+        // 字族与正文同源：fontFamilyRules("body") 统一生成（「书内」时不注入，沿用书籍 head 样式）；
+        // 规则内含后代继承压制，避免书籍 CSS 对 p/span/li 单独指定的字体盖过设置
         val popupCss = "<style>" + fontFaceCss() +
             "body{margin:0;padding:14px;background:${p.bg} !important;color:${p.text} !important;" +
-            "font-size:${fnFontPx}px !important;line-height:1.65 !important;word-break:break-word;" +
-            (if (fnFamily.isNotEmpty()) "font-family:$fnFamily !important;" else "") + "}" +
+            "font-size:${fnFontPx}px !important;line-height:1.65 !important;word-break:break-word;}" +
+            fontFamilyRules("body") +
             // 兜底：图片居中、限宽；脚注节点常被书籍 CSS 隐藏（aside），弹层内强制显示
             "img,svg{max-width:100% !important;height:auto;display:block !important;" +
             "margin-left:auto !important;margin-right:auto !important;float:none !important;}" +
@@ -1607,7 +1799,8 @@ class BookActivity : Activity() {
             "sup{font-size:.75em;}" +
             "blockquote{margin:.6em 0 .6em 1em;border-left:3px solid ${p.link};padding-left:.6em;}" +
             "</style>" +
-            // 弹注内点击注释标记：解析为绝对地址 → openCrossRef 就地刷新弹注；
+            // 弹注内点击：同样只认 epub:type="noteref" 注释类链接，就地刷新弹注；
+            // 普通链接不再误弹一层（弹注 WebView 本就不放行任何导航）。
             // 高度钩子：load/字体就绪/延迟重测后上报文档高度（主动定窗）
             "<script>" +
             "function __fh(){try{ReaderBridge.onFnH(String(document.documentElement.getBoundingClientRect().height))}catch(e){}}" +
@@ -1623,9 +1816,19 @@ class BookActivity : Activity() {
             "try{ReaderBridge.onSelection(tx,r.left,r.top,r.right,r.bottom)}catch(e){}}" +
             "document.addEventListener('selectionchange',function(){clearTimeout(__selT);" +
             "__selT=setTimeout(__selReport,250);},false);" +
+            "function __isNoteRef(a){if(!a||!a.getAttribute)return false;" +
+            "var v='';try{v=a.getAttribute('epub:type')||''}catch(e){}" +
+            "if(!v){try{v=(a.getAttributeNS&&a.getAttributeNS('http://www.idpf.org/2007/ops','type'))||''}catch(e){}}" +
+            "if(!v){try{v=a.getAttribute('role')||''}catch(e){}}" +
+            "if(!v){try{v=a.getAttribute('class')||''}catch(e){}}" +
+            "if(!v){try{v=a.getAttribute('type')||''}catch(e){}}" +
+            "if(!v)return false;" +
+            "var t=' '+String(v).toLowerCase().replace(/[^a-z0-9-]+/g,' ')+' ';" +
+            "return t.indexOf(' noteref ')>=0||t.indexOf(' doc-noteref ')>=0;}" +
             "document.addEventListener('click',function(e){" +
             "var a=e.target;while(a&&a.nodeType===1&&a.tagName!=='A')a=a.parentNode;" +
-            "if(!a||a.nodeType!==1)return;var href=a.getAttribute('href')||'';" +
+            "if(!a||a.nodeType!==1)return;if(!__isNoteRef(a))return;" +
+            "var href=a.getAttribute('href')||'';" +
             "if(!href)return;if(/^(mailto:|tel:)/i.test(href))return;" +
             "e.preventDefault();e.stopPropagation();" +
             "var abs=href;try{abs=new URL(href,document.baseURI).href}catch(x){}" +
@@ -1922,37 +2125,54 @@ class BookActivity : Activity() {
         return out
     }
 
-    /** 跨文件脚注：按目标文件的 spine 索引取原文，就地提取 #fragment 节点弹层；
-     *  提取失败则兜底为整章跳转（fragment 定位） */
+    /** 跨文件注释：只弹出注释层，绝不切换当前阅读章节。
+     *  目标文件不必在 spine 中（EPUB 常把注释放在独立的 notes.xhtml），直接从包内读取；
+     *  无锚点时弹出该文件正文，锚点提取失败时给出提示——任何分支都不再 loadSpine。 */
     private fun openCrossRef(url: String) {
         val rel = url.substringAfter("book/$bookId/", "")
         if (rel.isEmpty()) return
         val path = ZipPaths.normalize(ZipPaths.decode(rel.substringBefore('#')))
         val frag = rel.substringAfter('#', "")
-        val idx = epub?.spine?.indexOfFirst { it.path == path } ?: -1
-        if (idx < 0) return
-        if (frag.isEmpty()) {
-            loadSpine(idx, Anchor.First)
-            return
-        }
+        if (path.isEmpty()) return
         Thread {
-            val bytes = try { archive?.entryBytes(path) } catch (_: Exception) { null }
-            var head = ""
-            var fragHtml: String? = null
-            val dir = path.substringBeforeLast('/', "")
-            if (bytes != null) {
-                val h = String(bytes, ZipPaths.detectCharset(bytes))
-                head = Regex("(?is)<head[^>]*>(.*?)</head>").find(h)?.groupValues?.get(1)
-                    ?.replace(Regex("(?is)<script[\\s\\S]*?</script>"), "") ?: ""
-                fragHtml = extractFragHtml(h, frag)
+            val bytes = try {
+                archive?.entryBytes(path)
+            } catch (_: Exception) {
+                null
             }
-            val fh = fragHtml
+            if (bytes == null) {
+                ui.post { Toast.makeText(this@BookActivity, R.string.footnote_empty, Toast.LENGTH_SHORT).show() }
+                return@Thread
+            }
+            val h = String(bytes, ZipPaths.detectCharset(bytes))
+            val head = Regex("(?is)<head[^>]*>(.*?)</head>").find(h)?.groupValues?.get(1)
+                ?.replace(Regex("(?is)<script[\\s\\S]*?</script>"), "") ?: ""
+            val dir = path.substringBeforeLast('/', "")
+            val content = if (frag.isEmpty()) {
+                extractBodyHtml(h)
+            } else {
+                // 锚点可能经 URL 编码（中文 id 等），原样取不到时按解码值重试一次
+                extractFragHtml(h, frag) ?: run {
+                    val decoded = try {
+                        java.net.URLDecoder.decode(frag, "UTF-8")
+                    } catch (_: Exception) {
+                        frag
+                    }
+                    if (decoded != frag) extractFragHtml(h, decoded) else null
+                }
+            }
             ui.post {
-                if (fh != null) showFootnoteIn(fh, head, dir, path)
-                else loadSpine(idx, Anchor.Frag(frag))
+                if (!content.isNullOrBlank()) showFootnoteIn(content, head, dir, path)
+                else Toast.makeText(this@BookActivity, R.string.footnote_empty, Toast.LENGTH_SHORT).show()
             }
         }.start()
     }
+
+    /** 无锚点的跨文件链接：取目标文件正文作为弹注内容（仍不跳章） */
+    private fun extractBodyHtml(html: String): String =
+        Regex("(?is)<body[^>]*>(.*?)</body>").find(html)?.groupValues?.get(1)
+            ?.replace(Regex("(?is)<script[\\s\\S]*?</script>"), "")
+            ?: html
 
     /** 提取 id=frag 的元素（同名标签配平到闭合，上限 200KB 防失控） */
     private fun extractFragHtml(html: String, frag: String): String? {
