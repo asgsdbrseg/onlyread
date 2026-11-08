@@ -11,8 +11,8 @@ android {
         applicationId = "com.onlyread.app"
         minSdk = 31          // 决策 #13：最低支持 Android 12
         targetSdk = 35
-        versionCode = 34
-        versionName = "0.4.18-m3"
+        versionCode = 36
+        versionName = "0.4.20-m3"
     }
 
     // CI 签名：GitHub Actions 将密钥解码为 app/keystore.jks，凭据经环境变量注入

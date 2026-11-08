@@ -54,6 +54,10 @@ object ReaderPrefs {
     fun fontSize(c: Context): Int = sp(c).getInt("font_px", 22) // M3.6：默认 20 → 22
     fun setFontSize(c: Context, v: Int) = sp(c).edit().putInt("font_px", v).apply()
 
+    // M3.8：异体字展开开关（默认开；外部 variants.json 表为空时展开无效果）
+    fun variantsOn(c: Context): Boolean = sp(c).getBoolean("variants_on", true)
+    fun setVariantsOn(c: Context, v: Boolean) = sp(c).edit().putBoolean("variants_on", v).apply()
+
     // M3：默认行距 1.5（原来 0=书内默认）
     fun lineHeight(c: Context): Double = Double.fromBits(sp(c).getLong("line_h", 1.5.toRawBits()))
     fun setLineHeight(c: Context, v: Double) = sp(c).edit().putLong("line_h", v.toRawBits()).apply()

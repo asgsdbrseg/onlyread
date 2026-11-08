@@ -14,12 +14,8 @@ import android.widget.ImageView
 import android.widget.ListView
 import android.widget.TextView
 import android.widget.Toast
-import com.onlyread.app.App
 import com.onlyread.app.R
-import com.onlyread.app.data.BookEntity
-import com.onlyread.app.epub.EpubArchive
-import com.onlyread.app.util.Hashing
-import com.onlyread.app.util.UriPath
+import com.onlyread.app.data.BookImporter
 import java.io.File
 
 /**
@@ -64,7 +60,7 @@ class FileBrowserActivity : Activity() {
         navigateTo(currentDir)
     }
 
-    /** M2.2：SAF 选择 EPUB → 拷贝到私有书库（同名覆盖，路径稳定以支持去重） */
+    /** M2.2：SAF 选择 EPUB → 解析真实路径后直引原文件（不复制）；解析不到即提示用户 */
     private fun pickEpub() {
         try {
             val i = Intent(Intent.ACTION_GET_CONTENT).apply {
@@ -83,13 +79,14 @@ class FileBrowserActivity : Activity() {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode != PICK_EPUB || resultCode != RESULT_OK) return
         val uri = data?.data ?: return
-        // M2.2：Reasily 式直接引用原文件（不复制到私有目录）——解析真实路径后登记
-        val path = UriPath.resolve(contentResolver, uri)
-        if (path == null || !File(path).isFile) {
-            Toast.makeText(this, R.string.import_need_local, Toast.LENGTH_LONG).show()
+        // 严格直引原文件：解析不到真实路径即提示用户，绝不复制到私有目录
+        val file = try {
+            BookImporter.resolveFile(this, uri)
+        } catch (e: Exception) {
+            Toast.makeText(this, e.message ?: getString(R.string.import_need_local), Toast.LENGTH_LONG).show()
             return
         }
-        importEpub(File(path))
+        importEpub(file)
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -122,7 +119,7 @@ class FileBrowserActivity : Activity() {
         Toast.makeText(this, R.string.tip_importing, Toast.LENGTH_SHORT).show()
         Thread {
             val msg = try {
-                doImport(file)
+                BookImporter.importFile(this@FileBrowserActivity, file).message
             } catch (e: Exception) {
                 "导入失败：${e.message}"
             }
@@ -133,50 +130,7 @@ class FileBrowserActivity : Activity() {
         }.start()
     }
 
-    private fun doImport(file: File): String {
-        val db = (application as App).db
-        if (db.countByPath(file.absolutePath) > 0) return "该书已在书架中"
-        EpubArchive(file).use { archive ->
-            val book = archive.parseBook() ?: return "EPUB 解析失败：未找到有效的 OPF"
-            val entity = BookEntity(
-                id = 0,
-                path = file.absolutePath,
-                size = file.length(),
-                mtimeMs = file.lastModified(),
-                identityHash = Hashing.shortHash(file),
-                title = book.title.ifBlank { file.nameWithoutExtension },
-                author = book.author,
-                language = book.language,
-                publisher = book.publisher,
-                coverPath = null,
-                spineCount = book.spine.size,
-                addedAt = System.currentTimeMillis(),
-                lastReadAt = 0L
-            )
-            val id = db.insert(entity)
-            // M1：目录缓存（FR-06）
-            try {
-                db.replaceToc(
-                    id,
-                    book.toc.mapIndexed { i, t ->
-                        com.onlyread.app.data.TocRow(i, t.spineIndex, t.title, t.level, t.frag ?: "")
-                    }
-                )
-            } catch (_: Exception) {
-            }
-            val coverHref = book.coverPath
-            if (coverHref != null) {
-                val bytes = archive.entryBytes(coverHref)
-                if (bytes != null) {
-                    val dir = File(filesDir, "covers").apply { mkdirs() }
-                    val coverFile = File(dir, "cover_$id")
-                    coverFile.writeBytes(bytes)
-                    db.updateCoverPath(id, coverFile.absolutePath)
-                }
-            }
-            return "已导入：${entity.title}"
-        }
-    }
+    // 导入逻辑统一由 BookImporter 承担（文件浏览器 / SAF / 外部「打开方式」共用）
 
     private inner class FileAdapter : BaseAdapter() {
         override fun getCount(): Int = rows.size

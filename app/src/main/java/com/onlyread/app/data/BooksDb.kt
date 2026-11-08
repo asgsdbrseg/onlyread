@@ -118,6 +118,12 @@ class BooksDb(context: Context) : SQLiteOpenHelper(context, "onlyread.db", null,
             if (c.moveToFirst()) c.getInt(0) else 0
         }
 
+    /** 外部「打开方式」重复打开同一文件时，直接取已有 id 以打开阅读，不重复插入。 */
+    fun getIdByPath(path: String): Long? =
+        readableDatabase.rawQuery("SELECT id FROM books WHERE path=?", arrayOf(path)).use { c ->
+            if (c.moveToFirst()) c.getLong(0) else null
+        }
+
     fun insert(b: BookEntity): Long {
         val cv = ContentValues().apply {
             put("path", b.path)

@@ -21,6 +21,7 @@ import android.widget.TextView
 import android.widget.Toast
 import com.onlyread.app.browser.FileBrowserActivity
 import com.onlyread.app.data.BookEntity
+import com.onlyread.app.data.BookImporter
 import com.onlyread.app.reader.BookActivity
 
 /**
@@ -66,6 +67,9 @@ class MainActivity : Activity() {
                 false
             }
         }
+        // 外部文件夹点 EPUB → 「打开方式」选 onlyread。仅首次创建时处理，
+        // 旋转屏幕等重建（savedInstanceState != null）不重复导入。
+        if (savedInstanceState == null) handleExternalEpub(intent)
     }
 
     override fun onResume() {
@@ -110,6 +114,53 @@ class MainActivity : Activity() {
             return
         }
         startActivity(Intent(this, FileBrowserActivity::class.java))
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        // Activity 已在栈顶被复用时（部分文件管理器带 NEW_TASK 复用），同样接住外部 VIEW
+        handleExternalEpub(intent)
+    }
+
+    private var lastExternalUri: String? = null
+
+    /**
+     * 外部文件夹「打开方式 / 用…打开」入口：严格解析真实路径后登记到书架，成功后直接打开阅读。
+     * 解析不到真实路径（第三方 provider / 云盘）时**不复制文件**，直接提示用户改用本机文件。
+     */
+    private fun handleExternalEpub(intent: Intent?) {
+        if (intent?.action != Intent.ACTION_VIEW) return
+        val uri = intent.data ?: return
+        val key = uri.toString()
+        if (key == lastExternalUri) return // 同一 Intent 重复投递不重复导入
+        lastExternalUri = key
+        // 兜底 filter 会放行 octet-stream：先按 MIME / 文件名过滤，别把任意文件登记进书架
+        if (!BookImporter.isEpubUri(this, uri)) {
+            Toast.makeText(this, R.string.import_not_epub, Toast.LENGTH_LONG).show()
+            return
+        }
+        Toast.makeText(this, R.string.tip_importing, Toast.LENGTH_SHORT).show()
+        Thread {
+            val outcome = runCatching { BookImporter.importUri(this@MainActivity, uri) }
+            ui.post {
+                outcome.fold(
+                    onSuccess = { res ->
+                        Toast.makeText(this, res.message, Toast.LENGTH_SHORT).show()
+                        reload()
+                        startActivity(
+                            Intent(this, BookActivity::class.java)
+                                .putExtra(BookActivity.EXTRA_BOOK_ID, res.bookId)
+                        )
+                    },
+                    onFailure = { e ->
+                        Toast.makeText(
+                            this, e.message ?: getString(R.string.open_fail), Toast.LENGTH_LONG
+                        ).show()
+                    }
+                )
+            }
+        }.start()
     }
 
     private fun deleteBook(b: BookEntity) {

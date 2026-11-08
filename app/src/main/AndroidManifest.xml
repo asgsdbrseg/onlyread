@@ -40,6 +40,46 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+
+            <!-- 外部文件夹点 EPUB → 「打开方式 / 用…打开」里出现 onlyread。
+                 ① 标准 EPUB MIME：系统「文件」应用、下载管理器、浏览器 -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="file" />
+                <data android:scheme="content" />
+                <data android:mimeType="application/epub+zip" />
+            </intent-filter>
+
+            <!-- ② 扩展名兜底：文件管理器把 .epub 报成其它/空 MIME 时，靠 .epub 路径匹配。
+                 多组 pathPattern 是为绕开 Android pathPattern 对多段点号路径的匹配缺陷。 -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="file" />
+                <data android:scheme="content" />
+                <data android:host="*" />
+                <data android:mimeType="*/*" />
+                <data android:pathPattern=".*\.epub" />
+                <data android:pathPattern=".*\..*\.epub" />
+                <data android:pathPattern=".*\..*\..*\.epub" />
+                <data android:pathPattern=".*\..*\..*\..*\.epub" />
+                <data android:pathPattern=".*\.EPUB" />
+                <data android:pathPattern=".*\..*\.EPUB" />
+                <data android:pathPattern=".*\..*\..*\.EPUB" />
+                <data android:pathPattern=".*\..*\..*\..*\.EPUB" />
+            </intent-filter>
+
+            <!-- ③ content:// 且被报成通用二进制：SAF Uri 的 path 常不含 .epub，②的
+                 pathPattern 匹配不到，单独兜底；运行时按 MIME / 文件名二次校验。 -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:mimeType="application/octet-stream" />
+            </intent-filter>
         </activity>
 
         <activity

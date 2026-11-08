@@ -46,12 +46,13 @@
     <string name="set_fn_font">注释字号</string>
     <string name="import_pick">选择文件导入</string>
     <string name="import_need_local">无法定位所选文件的原路径，请用系统「文件」应用选择本机文件</string>
-    <string name="search_title">全书搜索</string>
+    <string name="import_not_epub">所选文件不是 EPUB</string>
+    <string name="search_title">全文搜索</string>
     <string name="search_btn">搜索</string>
     <string name="search_hint">输入关键词</string>
     <string name="search_regex">正则</string>
     <string name="search_progress">搜索中 %1$d/%2$d · 已找到 %3$d 条</string>
-    <string name="search_done">搜索完成 · 共 %1$d 条（上限 500）</string>
+    <string name="search_done">搜索完成 · 共 %1$d 条</string>
     <string name="opening">打开中…</string>
     <string name="toc_filter_hint">输入关键词过滤目录</string>
     <string name="search_stopped">已停止 · 找到 %1$d 条</string>

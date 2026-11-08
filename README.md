@@ -11,13 +11,13 @@
 
 为保证在任何网络环境下都能稳定构建，M0 起工程**只依赖 Android 框架 + Kotlin 标准库**：
 
-| 领域 | 实现 |
-|---|---|
-| 数据层 | 框架 `SQLiteOpenHelper`（`data/BooksDb.kt`，books 表结构与《设计文档 v1.1》§5 完全一致） |
-| UI | 框架 `Activity` + `GridView`/`ListView` + `AlertDialog` |
-| 线程模型 | `Thread` + `Handler(Looper.getMainLooper())` |
-| EPUB 解析 | `ZipFile` + `XmlPullParser`（无 Jsoup 等三方库） |
-| 阅读内核 | WebView + 虚拟资源通道（zip 直读回流，不落盘解包） |
+| 领域      | 实现                                                                    |
+| ------- | --------------------------------------------------------------------- |
+| 数据层     | 框架 `SQLiteOpenHelper`（`data/BooksDb.kt`，books 表结构与《设计文档 v1.1》§5 完全一致） |
+| UI      | 框架 `Activity` + `GridView`/`ListView` + `AlertDialog`                 |
+| 线程模型    | `Thread` + `Handler(Looper.getMainLooper())`                          |
+| EPUB 解析 | `ZipFile` + `XmlPullParser`（无 Jsoup 等三方库）                             |
+| 阅读内核    | WebView + 虚拟资源通道（zip 直读回流，不落盘解包）                                      |
 
 原设计的 Room/Coroutines/AppCompat 已移除；M1 进度锚点表将沿用同一 SQLite 方式扩展，表结构设计不受影响。
 
@@ -32,28 +32,28 @@
 
 ## M1 功能范围（0.2.0-m1，阅读闭环）
 
-- **分页引擎**：CSS 多栏 + 视口对齐几何（页宽=屏宽、16px 页边距），竖排横向翻页；
+- **分页引擎**：CSS 多栏 + 视口对齐几何（页宽=屏宽、16px 页边距），竖排横向翻页；  
   旋转屏幕自动重排版并保持阅读位置
-- **点击翻页（决策 #16）**：左 40% 上页 / 中 20% 呼出目录 / 右 40% 下页；
+- **点击翻页（决策 #16）**：左 40% 上页 / 中 20% 呼出目录 / 右 40% 下页；  
   章末右翻进入下一章、章首左翻进入上一章末页
-- **进度锚点（FR-04/FR-11）**：progress 表（spine_index/page_index/total_pages/
-  元素序号/百分比），翻页与退出即存；重开书籍按「首可见块元素序号」重定位，
+- **进度锚点（FR-04/FR-11）**：progress 表（spine_index/page_index/total_pages/  
+  元素序号/百分比），翻页与退出即存；重开书籍按「首可见块元素序号」重定位，  
   元素缺失时按页比例兜底；信息条显示 百分比 · 页码 · 章节
-- **目录（FR-06）**：导入时解析 EPUB3 NAV / EPUB2 NCX 存 toc 表；阅读中点中部呼出，
+- **目录（FR-06）**：导入时解析 EPUB3 NAV / EPUB2 NCX 存 toc 表；阅读中点中部呼出，  
   点击即跳章（层级缩进展示）
 
 主题 / 字体 / 全屏 / 脚注 → M2；搜索与选区 → M3。
 
 ## 构建方式
 
-**方式一：Android Studio / Gradle（推荐日常）**
+**方式一：Android Studio / Gradle（推荐日常）**  
 打开本目录，等待同步（工程零依赖，秒级），Run 即可。
 
-**方式二：GitHub Actions（自动发布）**
+**方式二：GitHub Actions（自动发布）**  
 见下节；打 `v*` tag 自动构建签名 APK 并发布 Release。
 
-**方式三：手工管线（无 Gradle 环境适用，见 `scripts/manual_build.sh`）**
-`aapt2 compile/link → 生成 R.kt → kotlinc → d8 → zip → zipalign → apksigner`，
+**方式三：手工管线（无 Gradle 环境适用，见 `scripts/manual_build.sh`）**  
+`aapt2 compile/link → 生成 R.kt → kotlinc → d8 → zip → zipalign → apksigner`，  
 需 JDK 17+、Android SDK build-tools 35.0.0 与 platform android-35、kotlin-compiler 2.0.21。
 
 ## 签名
@@ -65,24 +65,21 @@
 
 ## CI 自动构建与发布（GitHub Actions）
 
-`.github/workflows/release.yml`：**打 `v*` tag 自动构建并发布到 Release**；
+`.github/workflows/release.yml`：**打 `v*` tag 自动构建并发布到 Release**；  
 Actions 页手动触发仅产出 artifact 不发版。
 
 ### 首次配置（一次性）
 
 1. 本机生成密钥（或直接使用现有 `app/keystore.jks`）：
-
    ```bash
    keytool -genkeypair -v -keystore onlyread-release.jks \
      -alias onlyread -keyalg RSA -keysize 2048 -validity 10000
    base64 -w0 onlyread-release.jks > ks.b64   # macOS: base64 -i xx -o ks.b64
    ```
-
-2. 仓库 Settings → Secrets and variables → Actions，添加 4 个 Secret：
-   `ONLYREAD_KEYSTORE_BASE64`（ks.b64 内容）、`ONLYREAD_KS_PASSWORD`、
+2. 仓库 Settings → Secrets and variables → Actions，添加 4 个 Secret：  
+   `ONLYREAD_KEYSTORE_BASE64`（ks.b64 内容）、`ONLYREAD_KS_PASSWORD`、  
    `ONLYREAD_KEY_ALIAS`（onlyread）、`ONLYREAD_KEY_PASSWORD`。
-
-3. 验证：Actions → Build & Release → Run workflow → run 页下载 `onlyread-apk`
+3. 验证：Actions → Build & Release → Run workflow → run 页下载 `onlyread-apk`  
    （文件名不含 `unsigned` 即签名成功）。
 
 ### 发布新版本
@@ -93,30 +90,126 @@ git tag v0.1.0-m0 && git push origin v0.1.0-m0
 
 Release 自动出现 `onlyread-0.1.0-m0.apk`。以后发版 = 打 tag。
 
-| 场景 | 操作 | 结果 |
-|---|---|---|
-| 试构建（不发版） | Actions 手动 Run workflow | run 页下载 APK |
-| 正式发版 | 推送 `v*` tag | Release 自动发布 |
-| 改版本号 | 改 `app/build.gradle.kts` 的 versionName/Code 后打 tag | 新 Release |
+| 场景       | 操作                                                 | 结果           |
+| -------- | -------------------------------------------------- | ------------ |
+| 试构建（不发版） | Actions 手动 Run workflow                            | run 页下载 APK  |
+| 正式发版     | 推送 `v*` tag                                        | Release 自动发布 |
+| 改版本号     | 改 `app/build.gradle.kts` 的 versionName/Code 后打 tag | 新 Release    |
+
+## 本版调整（M3.7 / M3.8 / M3.9）
+
+- **弹注窗口取消圆角**：旧圆角来自 `panelBg()` 的 `GradientDrawable(cornerRadius=14dp)`，  
+  但面板内 WebView 是不透明矩形且铺满面板，改 radius 既看不出也「去不掉」；另一条来源是  
+  书籍自带 `<head>` 给 `html/body` 设的 `border-radius`。现改为纯色直角背景，并在弹注 CSS  
+  里显式压制 `html/body` 的圆角与阴影，两条来源一起去掉。选区菜单仍保留圆角。
+- **目录窗口尺寸对齐全文搜索窗口**：`MATCH_PARENT` 宽 × 80% 屏高（原为 72% + 主题默认宽度）；  
+  顶部居中，输入法弹起时仍会压缩高度以保证过滤框可见。
+- **全文搜索栏**：第一行保留输入框 + 「搜索」；「范围」按钮移到第二行，其后新增  
+  **「异体字」开关按钮**（默认「开」，状态持久化）。切换开关时若已有查询会立即重新搜索。
+- **选区菜单默认置于选区上方**（M3.8）：菜单放在下方会挡住向下拖动选区时的文字与拖动手柄。  
+  现默认 `选区顶 - 菜单高 - 12dp`，上方空间不足才退回下方，再放不下贴屏底。
+- **variants.json 只在应用启动时读取一次**（M3.8）：`App.onCreate` 读盘后常驻内存，  
+  搜索直接取缓存、不再读盘。修改文件后需**完全退出并重新打开 App** 才生效。
+- **不含 noteref 的裸注释标记可正确跳转**（M3.9）：古籍常见的 `<a href="#fn1">` 目标  
+  多被 `data-fnhide` 隐藏，此前完全交给 WebView 原生 fragment 导航，滚不到目标、只能落到  
+  文档开头。现在同文档 `#` 链接一律在 JS 捕获阶段拦截：注释类仍弹注，普通锚点由  
+  `__goFrag` 解除目标隐藏后按内容坐标翻到对应页；跨章锚点改用 `Anchor.Frag` 定位，  
+  不再丢到该章开头。目标确实不可见时保持原页，不回退章首。
+- **异体字展开提示即时显示**（M3.9）：此前「异体字已展开」只在扫描结束后才拼进完成文案。  
+  现在点「搜索」后状态栏立即显示，并贯穿「搜索中 / 完成 / 已停止」各阶段，不被刷新覆盖。
+- **全文搜索取消 500 条上限**（M3.9）：扫描不再在 `collected.size >= 500` 时提前停止，  
+  仅用户点「取消」或线程中断才结束；`search_done` 文案里的「（上限 500）」同步去掉。
+- **自定义字体缺字时回退到书内 CSS 字体**（M3.9）：古籍常在 CSS 里给生僻字、异体字指定专用  
+  字体，但 `#__wrap *{font-family:inherit !important}` 会压掉这些声明，缺字只能落到同样缺这些字的  
+  系统字体，显示为豆腐块。现在从章节内联 `<style>` / `style=` 以及 `<link rel=stylesheet>` 外部  
+  样式表中提取字体名，接进字体栈：`'__Custom'` → 书内 CSS 字体 → `'Noto Sans CJK SC'` →  
+  `sans-serif`，浏览器按字符逐个回退。外部 CSS 在后台线程读取（最多 8 个），字体名经安全过滤  
+  （最多 24 个）；纯函数 `ReaderHtml.bookFontFamilies / fontStackCss` 有 JVM 单测。
+- **弹注内图片取消强制居中，跟随书籍 CSS**（M3.9）：`popupCss` 原有  
+  `display:block + margin:auto + float:none` 三条 `!important` 把图片统一块级化居中，  
+  书籍 CSS 的对齐、浮动、文字环绕全部失效。现去掉这三条，只保留 `max-width:100%;height:auto`  
+  尺寸保护（防大图撑破弹注宽度），与正文 `pagedCss` 的图片口径一致。
+- **正文长网址可换行，不再超出屏幕边界**（M3.9）：Chromium 默认不在长 URL 等连续无空格串  
+  内部断行，溢出列宽后被 `body{overflow:hidden}` 裁掉（弹注 body 本就有 `word-break:break-word`，  
+  故只有正文出问题）。现在 `pagedCss` 注入 `#__wrap,#__wrap *` 的 `overflow-wrap/word-wrap/
+  word-break:break-word` 规则，仅当单词本身超过行宽时才断，中文与常规西文排版不受影响。
+- **外部文件夹 EPUB 可直接「用 onlyread 打开」**（M3.9）：`MainActivity` 新增三组  
+  `ACTION_VIEW` intent-filter（标准 `application/epub+zip` / `.epub` 扩展名兜底 /  
+  `application/octet-stream` 兜底），在系统「文件」应用、下载管理器里点 EPUB 即出现在打开方式列表。  
+  导入逻辑抽成 `BookImporter`，文件浏览器、SAF 选择、外部打开三处共用；导入成功后直接打开阅读，  
+  重复打开同一文件按 `books.path` 去重并直接跳到已有书。  
+  **严格直引原文件、绝不复制到私有目录**：`resolveFile()` 只接受能解析出真实路径且可读的本地  
+  文件（`UriPath` 覆盖 `file://`、系统「文件」应用 externalstorage document、MediaStore `_data`）；  
+  解析不到（第三方 content provider / 云盘）即提示「无法定位所选文件的原路径…」并中止，  
+  不会静默降级。运行时另有 `EpubNames` 按 MIME / 文件名二次校验，避免 octet-stream 兜底  
+  把任意二进制文件登记进书架；该纯函数有 JVM 单测。
+
+## 异体字搜索（可编辑的 variants.json）
+
+开启「异体字」时，输入 `黄钟` 会按表展开为 `[黄黃][钟锺𲈛鍾鐘]` 再作为正则扫描，  
+同组任意写法（`黃鐘`、`黃𲈛` 等）都能命中；关闭则按原词搜索。点「搜索」后状态栏  
+立即显示「异体字已展开」，并在进度 / 完成 / 停止各阶段保持，便于确认开关与启动时  
+读入的表已生效。
+
+**用户可编辑文件**（外部存储，用任意文件管理器即可修改）：
+
+```
+/storage/emulated/0/onlyread/variants.json
+```
+
+- 首次启动 App 自动把模板文件放到该路径；文件已存在则**绝不覆盖或改写**用户的修改。
+- **仅在应用启动时读取一次**（`App.onCreate`）：读盘后把表常驻进程内存，之后每次搜索直接  
+  取缓存，**不再读盘**。因此改完保存后需**完全退出并重新打开 App**（杀掉进程）才会生效；  
+  启动读取失败时打开搜索窗口会提示一次，该次启动内按原词搜索。
+- **原样读取，不做额外修改或补充**：文件存在时按内容原样解析、原样使用（不补字、不去重、  
+  不改顺序）；读取失败或 JSON 非法时不擅自替换成另一份数据。
+- 模板内容在 `app/src/main/assets/variants.json`；仓库根目录的 `variants.json` 为同一份内容，  
+  方便查看与版本管理。
+
+格式：键为单字，值为该字允许命中的全部写法；数组内容**原样**拼成字符类（顺序、重复项均保留，键自身不在数组里也不会自动补上）：
+
+```json
+{
+  "钟": ["钟", "锺", "𲈛", "鍾", "鐘"],
+  "锺": ["钟", "锺", "𲈛", "鍾", "鐘"],
+  "𲈛": ["钟", "锺", "𲈛", "鍾", "鐘"],
+  "鍾": ["钟", "锺", "𲈛", "鍾", "鐘"],
+  "鐘": ["钟", "锺", "𲈛", "鍾", "鐘"],
+  "黄": ["黄", "黃"],
+  "黃": ["黄", "黃"]
+}
+```
+
+注意两点：
+
+1. 搜索框「正则恒启用」——查询里含 `.` `*` `[` `(` 等元字符时视为用户手写正则，**不做**异体字改写。
+2. `𲈛` 是增补平面汉字（UTF-16 代理对），解析与展开均按 Unicode code point 处理，不会被拆坏。  
+   纯函数 `Variants.parse/expandQuery` 无 Android 依赖，JVM 单元测试见 `VariantsTest.kt`。
 
 ## 目录结构
 
 ```
 onlyread/
 ├─ .github/workflows/release.yml    CI：tag 触发构建+发布
+├─ variants.json                    异体字表模板（与 assets 内置默认一致）
 ├─ app/build.gradle.kts             零依赖构建配置 + CI 签名注入
+├─ app/src/main/assets/variants.json   异体字表模板（首次启动放到外部文件夹）
 ├─ app/src/main/java/com/onlyread/app/
 │  ├─ App.kt / MainActivity.kt      书架（GridView + 按需导入）
 │  ├─ browser/FileBrowserActivity.kt 文件浏览器
 │  ├─ reader/BookActivity.kt        阅读页（虚拟资源通道）
+│  ├─ reader/Variants.kt · VariantsStore.kt  异体字表解析/展开 + 启动时读盘与内存缓存
+│  ├─ reader/ReaderHtml.kt · ReaderPrefs.kt  HTML 纯函数 / 阅读偏好
 │  ├─ epub/EpubArchive.kt · EpubBook.kt   zip/OPF 解析
+│  ├─ data/BookImporter.kt          导入单一入口（严格直引原文件，不复制）
 │  ├─ data/BooksDb.kt               SQLite 书库表
-│  └─ util/ZipPaths.kt · Hashing.kt 路径/编码/MIME、身份指纹
+│  ├─ util/EpubNames.kt             EPUB 名字/MIME 识别（纯 JVM）
+│  └─ util/ZipPaths.kt · Hashing.kt · UriPath.kt 路径/编码/Uri、身份指纹
 └─ app/src/main/res/                中文文案 / 布局 / 自适应图标
 ```
 
 ## 里程碑
 
-M0 工程骨架（本版）→ M1 阅读闭环（分页 + 进度锚点 + 目录）→
-M2 阅读体验（主题/字体/全屏/脚注）→ M3 搜索与选区（正则搜索/词典）→
+M0 工程骨架（本版）→ M1 阅读闭环（分页 + 进度锚点 + 目录）→  
+M2 阅读体验（主题/字体/全屏/脚注）→ M3 搜索与选区（正则搜索/词典）→  
 M4 打磨（畸形回归集/性能）。详见设计文档 v1.1 第 6 节。

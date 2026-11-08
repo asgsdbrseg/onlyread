@@ -514,7 +514,9 @@ class BookActivity : Activity() {
                         return true
                     }
                     if (idx >= 0) {
-                        loadSpine(idx, Anchor.First)
+                        // M3.9：跨章锚点改用 Anchor.Frag 定位——新章加载后 __reanchor 的 frag 分支
+                        // 按内容坐标重定位到目标块所在页，不再丢到该章开头
+                        loadSpine(idx, if (frag != null) Anchor.Frag(frag) else Anchor.First)
                         return true
                     }
                 }
@@ -1050,7 +1052,7 @@ class BookActivity : Activity() {
         // 目录窗口几何：顶部固定（gravity TOP + 固定 y），底部随输入法上移；
         // 列表高度由窗口高度驱动，过滤框与三个按钮始终留在可视区内
         val screenH = resources.displayMetrics.heightPixels
-        val baseH = (screenH * 0.72f).toInt()
+        val baseH = (screenH * 0.80f).toInt() // M3.8：目录窗口高度对齐搜索窗口（80% 屏高）
         val topY = ((screenH - baseH) / 2f).toInt().coerceAtLeast(0)
         val reserve = (200 * d).toInt() // 标题栏 + 按钮栏 + 过滤框 + 内边距
         val minH = (320 * d).toInt()
@@ -1217,8 +1219,23 @@ class BookActivity : Activity() {
                 text = if (scopeAll) "范围：全书" else "范围：本章"
             }
         }
+        // M3.8：异体字展开开关（持久化）——按外部 variants.json 把字面查询展开为字符类
+        var variantsOn = ReaderPrefs.variantsOn(this)
+        val variantsBtn = android.widget.Button(this).apply {
+            textSize = 12f
+            isAllCaps = false
+            text = if (variantsOn) "异体字：开" else "异体字：关"
+            setOnClickListener {
+                variantsOn = !variantsOn
+                ReaderPrefs.setVariantsOn(this@BookActivity, variantsOn)
+                text = if (variantsOn) "异体字：开" else "异体字：关"
+            }
+        }
         row.addView(et)
-        row.addView(scopeBtn)
+        // M3.8：第二行放「范围」与「异体字」，输入行只留 输入框+搜索
+        val row2 = android.widget.LinearLayout(this).apply { orientation = android.widget.LinearLayout.HORIZONTAL }
+        row2.addView(scopeBtn)
+        row2.addView(variantsBtn)
         val status = TextView(this).apply {
             textSize = 12f
             setTextColor(getColor(R.color.text_sub))
@@ -1286,6 +1303,7 @@ class BookActivity : Activity() {
             status.text = getString(R.string.search_stopped, curCount)
         }
         box.addView(row)
+        box.addView(row2)
         box.addView(status)
         box.addView(
             lv, android.widget.LinearLayout.LayoutParams(
@@ -1293,8 +1311,11 @@ class BookActivity : Activity() {
             )
         )
         fun runSearch() {
-            val q = et.text.toString().trim()
-            if (q.isEmpty()) return
+            val raw = et.text.toString().trim()
+            if (raw.isEmpty()) return
+            // M3.8：异体字展开——开关开启时按表把字面查询展开为字符类（如 黄钟 → [黄黃][钟锺…]）；
+            // 查询含正则元字符视为用户手写正则，expandQuery 原样返回不改写
+            val q = if (variantsOn) Variants.expandQuery(raw, VariantsStore.current()) else raw
             // M3：正则恒启用；无效正则直接提示
             val re = try {
                 Regex(q, RegexOption.IGNORE_CASE)
@@ -1330,7 +1351,10 @@ class BookActivity : Activity() {
                     searchHits = snapshot
                     rebuild()
                     searchAdapter.notifyDataSetChanged()
-                    status.text = if (final) getString(R.string.search_done, snapshot.size)
+                    status.text = if (final)
+                        getString(R.string.search_done, snapshot.size) +
+                            // M3.8：提示异体字展开已生效（表非空且开关开启）
+                            if (variantsOn && VariantsStore.current().isNotEmpty()) " · 异体字已展开" else ""
                     else getString(R.string.search_progress, doneCount.get(), until - from, snapshot.size)
                     if (final) setSearching(false) // 扫描自然结束 → 按钮复原「搜索」
                 }
@@ -1788,6 +1812,8 @@ class BookActivity : Activity() {
         // 字族与正文同源：fontFamilyRules("body") 统一生成（「书内」时不注入，沿用书籍 head 样式）；
         // 规则内含后代继承压制，避免书籍 CSS 对 p/span/li 单独指定的字体盖过设置
         val popupCss = "<style>" + fontFaceCss() +
+            // M3.7：弹注窗口改直角——压制书籍 CSS 可能给 html/body 设置的圆角/阴影
+            "html,body{border-radius:0 !important;box-shadow:none !important;}" +
             "body{margin:0;padding:14px;background:${p.bg} !important;color:${p.text} !important;" +
             "font-size:${fnFontPx}px !important;line-height:1.65 !important;word-break:break-word;}" +
             fontFamilyRules("body") +
@@ -1902,11 +1928,11 @@ class BookActivity : Activity() {
         fnPanelBox = null
     }
 
-    /** 弹注面板背景：四角圆角（居中弹窗）、面板色随主题 */
+    /** 弹注面板背景：M3.7 起改直角（居中弹窗、面板色随主题） */
     private fun panelBg(): android.graphics.drawable.GradientDrawable {
         val gd = android.graphics.drawable.GradientDrawable()
         gd.setColor(Color.parseColor(pal().bg))
-        gd.cornerRadius = 14f.dip()
+        gd.cornerRadius = 0f
         return gd
     }
 
@@ -2055,11 +2081,12 @@ class BookActivity : Activity() {
         val selB = (b * d).toInt() + oy
         var x = selL - (6 * d).toInt()
         x = x.coerceIn((8 * d).toInt(), (screenW - mw - (8 * d).toInt()).coerceAtLeast((8 * d).toInt()))
-        var y = selB + (50 * d).toInt()
-        if (y + mh > screenH) {
-            y = selT - mh - (12 * d).toInt()
-        }
+        // M3.8：默认置于选区上方（选区顶 - 菜单高 - 12dp），不遮选区与拖动手柄
+        var y = selT - mh - (12 * d).toInt()
         if (y < (8 * d).toInt()) {
+            y = selB + (50 * d).toInt() // 上方放不下：移到下方
+        }
+        if (y + mh > screenH) {
             y = screenH - mh - (16 * d).toInt() // 上下都放不下：贴屏底
         }
         pw.showAtLocation(window.decorView, android.view.Gravity.NO_GRAVITY, x.coerceAtLeast(0), y.coerceAtLeast(0))
