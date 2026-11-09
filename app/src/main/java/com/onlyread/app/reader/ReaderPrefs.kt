@@ -14,31 +14,37 @@ object ReaderPrefs {
 
     private fun sp(c: Context) = c.getSharedPreferences(FILE, Context.MODE_PRIVATE)
 
-    // M3：schema 版本——升级默认排版参数用（只迁移一次）
-    private const val SCHEMA = 2
+    // M3.10：schema 版本——升级默认排版参数用（只迁移一次）
+    private const val SCHEMA = 3
 
-    /** 一次性迁移到新默认：字号20 / 行距1.5 / 边距 10,10,30,30 / 注释20（主题与自定义字体保留）。
-     *  在 App.onCreate 调用，读取任何偏好之前 */
+    /** 一次性迁移到新默认：字号 22 / 行距 1.5 / 边距 10,10,30,30 / 注释 20（主题与自定义字体保留）。
+     *  在 App.onCreate 调用，须先于任何偏好读取。
+     *  - 全新安装 / 未迁移（schema < 2）：写入全套默认值，字号 22；
+     *  - 旧版已迁移（schema = 2）且字号仍是旧默认 20：仅把字号提到 22；
+     *  - 用户手动设置过的其它字号 / 边距 / 行距一律保留，不重置。 */
     fun migrateIfNeeded(c: Context) {
         val p = sp(c)
-        if (p.getInt("schema", 0) >= SCHEMA) return
-        p.edit()
-            .putInt("font_px", 20)
-            .putLong("line_h", 1.5.toRawBits())
-            .putInt("margin_l", 10)
-            .putInt("margin_r", 10)
-            .putInt("margin_t", 30)
-            .putInt("margin_b", 30)
-            .putInt("fn_font", 20)
-            .putInt("schema", SCHEMA)
-            .apply()
+        val old = p.getInt("schema", 0)
+        if (old >= SCHEMA) return
+        val e = p.edit()
+        if (old < 2) {
+            e.putInt("font_px", 22)
+                .putLong("line_h", 1.5.toRawBits())
+                .putInt("margin_l", 10)
+                .putInt("margin_r", 10)
+                .putInt("margin_t", 30)
+                .putInt("margin_b", 30)
+                .putInt("fn_font", 20)
+        } else if (p.getInt("font_px", 22) == 20) {
+            e.putInt("font_px", 22)
+        }
+        e.putInt("schema", SCHEMA).apply()
     }
 
     fun theme(c: Context): Int = sp(c).getInt("theme", THEME_PAPER)
     fun setTheme(c: Context, t: Int) = sp(c).edit().putInt("theme", t).apply()
 
-    fun immersive(c: Context): Boolean = sp(c).getBoolean("immersive", false)
-    fun setImmersive(c: Context, b: Boolean) = sp(c).edit().putBoolean("immersive", b).apply()
+    // M3.10：取消「全屏沉浸阅读」，immersive 偏好与开关一并移除，系统栏保持常规显示
 
     // M2.2：页边距（CSS px，上下左右独立）；M3 默认 10/10/30/30
     fun marginL(c: Context): Int = sp(c).getInt("margin_l", 10)
@@ -50,8 +56,10 @@ object ReaderPrefs {
             .putInt("margin_t", t).putInt("margin_b", b).apply()
 
     // M2.2：全局排版（所有书共享；0/0/''=书内默认）
-    // M3：默认字号 20px（原来 0=书内默认）
-    fun fontSize(c: Context): Int = sp(c).getInt("font_px", 22) // M3.6：默认 20 → 22
+    // M3.10：默认字号 22px
+    // M3.10：取消「全屏沉浸阅读」，immersive 偏好与开关一并移除，系统栏保持常规显示
+
+    fun fontSize(c: Context): Int = sp(c).getInt("font_px", 22)
     fun setFontSize(c: Context, v: Int) = sp(c).edit().putInt("font_px", v).apply()
 
     // M3.8：异体字展开开关（默认开；外部 variants.json 表为空时展开无效果）

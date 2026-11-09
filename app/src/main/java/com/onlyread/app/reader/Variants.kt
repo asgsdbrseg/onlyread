@@ -32,8 +32,9 @@ object Variants {
      * - 表内无映射或数组为空 → 原码位原样保留；
      * - 查询含正则元字符 → 原样返回，用户自己写的正则优先。
      *
-     * 不对配置做任何额外修改或补充：不自动补键自身、不去重、不改顺序、不转义、
-     * 不退化成分支。展开结果同时用于「扫描 / 结果高亮 / 跳转高亮」，三处口径一致。
+     * 不对配置做任何额外修改或补充：不自动补键自身、不去重、不改顺序、不退化成分支；
+     * 仅在字符类内对 `\ ] ^ -` 做最小转义（M3.10，防止表值破坏字符类结构）。
+     * 展开结果同时用于「扫描 / 结果高亮 / 跳转高亮」，三处口径一致。
      */
     fun expandQuery(query: String, variants: Map<String, List<String>>): String {
         if (query.isEmpty() || variants.isEmpty()) return query
@@ -49,11 +50,24 @@ object Variants {
                 sb.append(unit)
             } else {
                 sb.append('[')
-                group.forEach { sb.append(it) } // 原样：文件里写什么、按什么顺序，就拼什么
+                // M3.10：最小转义——`\ ] ^ -` 在字符类内有特殊含义，转义避免破坏字符类；
+                // 顺序与重复项仍原样保留
+                group.forEach { sb.append(escapeInClass(it)) }
                 sb.append(']')
             }
         }
         return sb.toString()
+    }
+
+    /** 字符类内需转义的元字符：反斜杠、闭括号、否定符、连字符（其余字面字符原样保留） */
+    private fun escapeInClass(s: String): String = buildString {
+        for (ch in s) when (ch) {
+            '\\' -> append("\\\\")
+            ']' -> append("\\]")
+            '^' -> append("\\^")
+            '-' -> append("\\-")
+            else -> append(ch)
+        }
     }
 
     /** 极简 JSON 读取器：只认 `{ "键": ["值", …], … }` 这一种结构。 */

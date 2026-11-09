@@ -42,7 +42,7 @@
 - **目录（FR-06）**：导入时解析 EPUB3 NAV / EPUB2 NCX 存 toc 表；阅读中点中部呼出，  
   点击即跳章（层级缩进展示）
 
-主题 / 字体 / 全屏 / 脚注 → M2；搜索与选区 → M3。
+主题 / 字体 / 脚注 → M2；搜索与选区 → M3。
 
 ## 构建方式
 
@@ -96,7 +96,7 @@ Release 自动出现 `onlyread-0.1.0-m0.apk`。以后发版 = 打 tag。
 | 正式发版     | 推送 `v*` tag                                        | Release 自动发布 |
 | 改版本号     | 改 `app/build.gradle.kts` 的 versionName/Code 后打 tag | 新 Release    |
 
-## 本版调整（M3.7 / M3.8 / M3.9）
+## 本版调整（M3.7 / M3.8 / M3.9 / M3.10）
 
 - **弹注窗口取消圆角**：旧圆角来自 `panelBg()` 的 `GradientDrawable(cornerRadius=14dp)`，  
   但面板内 WebView 是不透明矩形且铺满面板，改 radius 既看不出也「去不掉」；另一条来源是  
@@ -137,19 +137,39 @@ Release 自动出现 `onlyread-0.1.0-m0.apk`。以后发版 = 打 tag。
   `ACTION_VIEW` intent-filter（标准 `application/epub+zip` / `.epub` 扩展名兜底 /  
   `application/octet-stream` 兜底），在系统「文件」应用、下载管理器里点 EPUB 即出现在打开方式列表。  
   导入逻辑抽成 `BookImporter`，文件浏览器、SAF 选择、外部打开三处共用；导入成功后直接打开阅读，  
-  重复打开同一文件按 `books.path` 去重并直接跳到已有书。  
+  重复打开同一文件按 canonical 路径 + `identity_hash` 去重并直接跳到已有书（详见 M3.10）。  
   **严格直引原文件、绝不复制到私有目录**：`resolveFile()` 只接受能解析出真实路径且可读的本地  
   文件（`UriPath` 覆盖 `file://`、系统「文件」应用 externalstorage document、MediaStore `_data`）；  
   解析不到（第三方 content provider / 云盘）即提示「无法定位所选文件的原路径…」并中止，  
   不会静默降级。运行时另有 `EpubNames` 按 MIME / 文件名二次校验，避免 octet-stream 兜底  
   把任意二进制文件登记进书架；该纯函数有 JVM 单测。
 
+### M3.10 修正（本次）
+
+- **同一本书不再重复导入**：`BookImporter.importFile` 先对路径取 `canonicalFile`（消除
+  `/sdcard` 与 `/storage/emulated/0` 等符号链接写法差异），再按路径与 `identity_hash`
+  （首/尾 64KB SHA-1 + 长度）双重去重；命中即复用已有 id 直接打开，并把旧记录路径归一。
+  `BooksDb.dedupeDuplicates()` 在启动时归并历史重复记录，升级后书架不再残留两本一样的书。
+- **正文长网址可换行**：`pagedCss` 注入 `#__wrap,#__wrap *` 的
+  `overflow-wrap/word-wrap/word-break:break-word`，长 URL 不再溢出列宽、与下一页文字重叠。
+- **自定义字体缺字回退到书内 CSS 字体**：`ReaderHtml.bookFontFamilies / fontStackCss`
+  从章节内联 `<style>`、`style=` 与 `<link rel=stylesheet>` 外部 CSS（后台线程，最多 8 个）
+  提取字体名（安全过滤、最多 24 个），接进字体栈 `'__Custom'` → 书内 CSS 字体 →
+  `'Noto Sans CJK SC'` → `sans-serif`；正文与弹注同源，均有 JVM 单测。
+- **默认字号改为 22px**：`migrateIfNeeded` 与 `fontSize` 默认值、设置面板兜底统一为 22；
+  旧版停留在 20px 默认值的用户升级时自动迁移到 22，手动设置过的字号保持不动。
+- **取消「全屏沉浸阅读」**：移除 `ReaderPrefs.immersive/setImmersive`、`applyImmersive()`、
+  设置面板 CheckBox 与 `set_immersive` 文案，系统栏保持常规显示。
+- **修复异体字关联搜索**：字表为空 / 读取失败 / JSON 非法时回退内置模板并提示一次（不再
+  静默变空表）；字符类内正则元字符做最小转义；取消扫描结果 500 条上限；切换「异体字」
+  开关立即用当前查询重搜；「异体字已展开」提示贯穿搜索各阶段。
+
 ## 异体字搜索（可编辑的 variants.json）
 
 开启「异体字」时，输入 `黄钟` 会按表展开为 `[黄黃][钟锺𲈛鍾鐘]` 再作为正则扫描，  
 同组任意写法（`黃鐘`、`黃𲈛` 等）都能命中；关闭则按原词搜索。点「搜索」后状态栏  
 立即显示「异体字已展开」，并在进度 / 完成 / 停止各阶段保持，便于确认开关与启动时  
-读入的表已生效。
+读入的表已生效。切换开关会以当前查询立即重搜；扫描结果不再有 500 条上限。
 
 **用户可编辑文件**（外部存储，用任意文件管理器即可修改）：
 
@@ -160,9 +180,9 @@ Release 自动出现 `onlyread-0.1.0-m0.apk`。以后发版 = 打 tag。
 - 首次启动 App 自动把模板文件放到该路径；文件已存在则**绝不覆盖或改写**用户的修改。
 - **仅在应用启动时读取一次**（`App.onCreate`）：读盘后把表常驻进程内存，之后每次搜索直接  
   取缓存，**不再读盘**。因此改完保存后需**完全退出并重新打开 App**（杀掉进程）才会生效；  
-  启动读取失败时打开搜索窗口会提示一次，该次启动内按原词搜索。
-- **原样读取，不做额外修改或补充**：文件存在时按内容原样解析、原样使用（不补字、不去重、  
-  不改顺序）；读取失败或 JSON 非法时不擅自替换成另一份数据。
+  启动读取失败 / 格式错误 / 空表时打开搜索窗口会提示一次。
+- **原样读取，不做额外修改或补充**：文件可解析时按内容原样使用（不补字、不去重、不改顺序）；  
+  读取失败、格式非法或空表时**回退到 assets 内置模板并提示**，避免关联搜索静默失效。
 - 模板内容在 `app/src/main/assets/variants.json`；仓库根目录的 `variants.json` 为同一份内容，  
   方便查看与版本管理。
 
@@ -211,5 +231,5 @@ onlyread/
 ## 里程碑
 
 M0 工程骨架（本版）→ M1 阅读闭环（分页 + 进度锚点 + 目录）→  
-M2 阅读体验（主题/字体/全屏/脚注）→ M3 搜索与选区（正则搜索/词典）→  
+M2 阅读体验（主题/字体/脚注）→ M3 搜索与选区（正则搜索/词典）→  
 M4 打磨（畸形回归集/性能）。详见设计文档 v1.1 第 6 节。

@@ -65,19 +65,29 @@ object BookImporter {
     /** 绝对路径导入：解析元数据 → 登记 → 目录缓存 → 封面落盘。 */
     fun importFile(context: Context, file: File): Result {
         val db = (context.applicationContext as App).db
-        db.getIdByPath(file.absolutePath)?.let { id ->
-            val title = db.getById(id)?.title ?: file.nameWithoutExtension
+        // M3.10：canonical 归一——/sdcard 与 /storage/emulated/0 等符号链接写法视为同一文件
+        val canon = try { file.canonicalFile } catch (_: Exception) { file }
+        db.getIdByPath(canon.absolutePath)?.let { id ->
+            val title = db.getById(id)?.title ?: canon.nameWithoutExtension
             return Result(id, title, "该书已在书架中", true)
         }
-        EpubArchive(file).use { archive ->
+        // M3.10：同一本书换路径/改名后按身份指纹（首/尾 64KB SHA-1 + 长度）仍能识别，
+        // 命中即复用旧记录并把路径归一，绝不重复插入书架（先于 EPUB 解析，快速返回）
+        val hash = Hashing.shortHash(canon)
+        db.getIdByHash(hash)?.let { id ->
+            val title = db.getById(id)?.title ?: canon.nameWithoutExtension
+            db.updatePath(id, canon.absolutePath)
+            return Result(id, title, "该书已在书架中", true)
+        }
+        EpubArchive(canon).use { archive ->
             val book = archive.parseBook()
                 ?: throw IllegalArgumentException("EPUB 解析失败：未找到有效的 OPF")
             val entity = BookEntity(
                 id = 0,
-                path = file.absolutePath,
-                size = file.length(),
-                mtimeMs = file.lastModified(),
-                identityHash = Hashing.shortHash(file),
+                path = canon.absolutePath,
+                size = canon.length(),
+                mtimeMs = canon.lastModified(),
+                identityHash = hash,
                 title = book.title.ifBlank { file.nameWithoutExtension },
                 author = book.author,
                 language = book.language,

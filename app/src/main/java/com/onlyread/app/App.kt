@@ -16,5 +16,10 @@ class App : Application() {
         // 随后在启动时一次性读入进程内存缓存；搜索不再读盘
         VariantsStore.ensureExternal(this)
         VariantsStore.loadOnStartup(this)
+        // M3.10：归并历史重复记录（旧版本按原始路径字符串判重，符号链接差异会插两本）
+        try {
+            db.dedupeDuplicates()
+        } catch (_: Exception) {
+        }
     }
 }

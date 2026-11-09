@@ -165,4 +165,65 @@ object ReaderHtml {
         val p = kotlin.math.floor((contentLeftPx - marginLeftPx) / pageWidthPx).toInt()
         return if (p < 0) 0 else p
     }
+
+    // ————— M3.10：书内 CSS 字体提取与自定义字体缺字回退栈 —————
+
+    private val styleBlockRe = Regex("(?is)<style[^>]*>([\\s\\S]*?)</style>")
+    private val inlineStyleRe = Regex("(?is)style\\s*=\\s*\"([^\"]*)\"")
+    private val cssLinkRe = Regex("(?is)<link[^>]+rel\\s*=\\s*[\"']?stylesheet[\"']?[^>]*>")
+    private val cssHrefRe = Regex("(?is)href\\s*=\\s*[\"']([^\"']+)[\"']")
+    private val fontFamilyRe = Regex("(?is)font-family\\s*:\\s*([^;}]+)")
+    private val safeFontNameRe =
+        Regex("^[\\w\\u4e00-\\u9fff\\u3040-\\u30ff\\uac00-\\ud7af][\\w\\s\\u4e00-\\u9fff\\u3040-\\u30ff\\uac00-\\ud7af.-]*$")
+    private val genericFamilies =
+        setOf("serif", "sans-serif", "monospace", "cursive", "fantasy", "system-ui", "inherit", "initial", "unset")
+
+    /**
+     * 从章节 HTML 提取书内 CSS 字体名（最多 24 个，顺序保留）：
+     * 内联 `<style>`、`style="font-family:…"` 属性、`<link rel=stylesheet>` 外部 CSS
+     * （外链由 [resolveCss] 解析内容，最多取 8 个）。
+     *
+     * 安全过滤：字体名会拼进 `font-family:` 值，只放行 字母/数字/CJK/空格/连字符/下划线/点
+     * 组成的名字（拦截 `}` `;` `(` 等 CSS 逃逸字符），通用族（serif 等）与超长名字不收。
+     */
+    fun bookFontFamilies(html: String, resolveCss: (String) -> String?): List<String> {
+        val sources = ArrayList<String>()
+        styleBlockRe.findAll(html).forEach { sources.add(it.groupValues[1]) }
+        inlineStyleRe.findAll(html).forEach { sources.add(it.groupValues[1]) }
+        var links = 0
+        val seen = HashSet<String>()
+        cssLinkRe.findAll(html).forEach { m ->
+            if (links >= 8) return@forEach
+            val href = cssHrefRe.find(m.value)?.groupValues?.get(1) ?: return@forEach
+            if (!seen.add(href.substringBefore('#'))) return@forEach
+            links++
+            resolveCss(href)?.let { sources.add(it) }
+        }
+        val out = LinkedHashSet<String>()
+        outer@ for (s in sources) {
+            for (fm in fontFamilyRe.findAll(s)) {
+                for (one in fm.groupValues[1].split(',')) {
+                    var name = one.trim().trim('\'', '"').trim()
+                    if (name.isEmpty() || name.length > 64) continue
+                    if (name.lowercase() in genericFamilies) continue
+                    if (!safeFontNameRe.matches(name)) continue
+                    out.add(name)
+                    if (out.size >= 24) break@outer
+                }
+            }
+        }
+        return out.toList()
+    }
+
+    /**
+     * 自定义字体缺字回退栈：`'__Custom'` → 书内 CSS 字体（按出现顺序）→
+     * `'Noto Sans CJK SC'` → `sans-serif`。书内字体排在系统字体前——
+     * 自定义 TTF 覆盖不到的字形（生僻字、异体字）先借书内声明的字体，再落系统兜底。
+     */
+    fun fontStackCss(bookFonts: List<String>): String {
+        val sb = StringBuilder("'__Custom'")
+        for (f in bookFonts) sb.append(",'").append(f).append('\'')
+        sb.append(",'Noto Sans CJK SC',sans-serif")
+        return sb.toString()
+    }
 }

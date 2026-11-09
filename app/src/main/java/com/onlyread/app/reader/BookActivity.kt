@@ -387,10 +387,13 @@ class BookActivity : Activity() {
 
     // M2：主题（全局）与排版（每书）
     private var themeId = ReaderPrefs.THEME_PAPER
-    private var immersive = false
+    // M3.10：搜索窗内「异体字」开关切换后立即重搜的钩子（runSearch 为局部函数，经此触发）
+    private var searchRerunHook: (() -> Unit)? = null
     private var fontPx = 0          // 0=书内默认
     private var lineH = 0.0         // 0=书内默认
     private var fontFam = ""        // ''=书内 / serif / sans / custom
+    // M3.10：当前章书内 CSS 字体名（loadSpine 后台提取，主线程读；供自定义字体缺字回退）
+    @Volatile private var curBookFonts: List<String> = emptyList()
     private var mL = 16            // 左边距（CSS px，M2.2 可自定义）
     private var mR = 16            // 右边距
     private var mT = 34            // 上边距（含信息条预留）
@@ -441,13 +444,13 @@ class BookActivity : Activity() {
         setupTouch()
 
         themeId = ReaderPrefs.theme(this)
-        immersive = ReaderPrefs.immersive(this)
+        // M3.10：取消「全屏沉浸阅读」——系统栏保持常规显示，不再有隐藏/呼出状态
+
         mL = ReaderPrefs.marginL(this).coerceIn(0, 48)
         mR = ReaderPrefs.marginR(this).coerceIn(0, 48)
         mT = ReaderPrefs.marginT(this).coerceIn(0, 96)
         mB = ReaderPrefs.marginB(this).coerceIn(0, 96)
         applyThemeChrome()
-        applyImmersive()
         webView.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
             val nw = webView.width; val nh = webView.height
             if (nw <= 0 || nh <= 0) return@addOnLayoutChangeListener
@@ -772,7 +775,21 @@ class BookActivity : Activity() {
             // ⚠️ 繁重标记（多趟正则，大书/复杂书可达数百毫秒）放到后台线程：
             // 主线程只负责 geometry（廉价）+ loadDataWithBaseURL，打开/跳转不再冻结、空白期大幅缩短
             val markedHtml = ReaderHtml.markChapterForReader(rawHtml, item.path)
-            ui.post { awaitLayout { doLoad(index, anchor, item.path, markedHtml, charset) } }
+            // M3.10：提取书内 CSS 字体名（后台线程；link 外链 CSS 从 zip 直读，最多 8 个），
+            // 供自定义字体缺字回退（'__Custom' → 书内字体 → 系统兜底）
+            val dir = item.path.substringBeforeLast('/', "")
+            val bookFonts = ReaderHtml.bookFontFamilies(rawHtml) { href ->
+                try {
+                    val target = ZipPaths.normalize(ZipPaths.join(dir, ZipPaths.decode(href.substringBefore('#'))))
+                    arch.entryBytes(target)?.let { String(it, ZipPaths.detectCharset(it)) }
+                } catch (_: Exception) {
+                    null
+                }
+            }
+            ui.post {
+                curBookFonts = bookFonts
+                awaitLayout { doLoad(index, anchor, item.path, markedHtml, charset) }
+            }
         }.start()
     }
 
@@ -823,6 +840,9 @@ class BookActivity : Activity() {
             "html,body{margin:0 !important;padding:0 !important;box-sizing:content-box !important;}" +
             "body{width:${pageW}px !important;overflow:hidden !important;}" +
             "#__wrap{width:${colW}px !important;padding-left:${mL}px !important;padding-top:${mT}px !important;" +
+            // M3.10：长网址/无空格长串可断行换行，不再溢出列宽与下一页文字重叠
+            "overflow-wrap:break-word !important;word-wrap:break-word !important;word-break:break-word;}" +
+            "#__wrap,#__wrap *{overflow-wrap:break-word;word-wrap:break-word;word-break:break-word;}" +
             "column-width:${colW}px !important;column-gap:${gap}px !important;height:${h2}px !important;" +
             "column-fill:auto !important;position:relative;box-sizing:content-box !important;}" +
             "img,svg{max-width:100%;}body img,body svg{max-height:${h2 - 4}px;}" +
@@ -1229,6 +1249,9 @@ class BookActivity : Activity() {
                 variantsOn = !variantsOn
                 ReaderPrefs.setVariantsOn(this@BookActivity, variantsOn)
                 text = if (variantsOn) "异体字：开" else "异体字：关"
+                // M3.10：切换开关立即用当前查询重搜（结果口径立刻变化）；
+                // runSearch 是后文声明的局部函数，经字段 hook 延迟触发
+                searchRerunHook?.invoke()
             }
         }
         row.addView(et)
@@ -1241,6 +1264,11 @@ class BookActivity : Activity() {
             setTextColor(getColor(R.color.text_sub))
             setPadding(0, (8 * d).toInt(), 0, (4 * d).toInt())
         }
+        // M3.10：异体字回退/不可读提示——开窗展示一次（loadOnStartup 时机，取后清空）
+        VariantsStore.takeNotice()?.let { status.text = it }
+        // M3.10：异体字展开生效提示贯穿搜索各阶段（表非空且开关开启时）
+        fun variantSuffix(): String =
+            if (variantsOn && VariantsStore.current().isNotEmpty()) " · 异体字已展开" else ""
         val lv = android.widget.ListView(this)
         // M3：Reasily 式聚合展示——章节组头 + 命中片段行
         class G(val title: String)
@@ -1300,7 +1328,7 @@ class BookActivity : Activity() {
             searchPool?.shutdownNow()
             searchPool = null
             setSearching(false)
-            status.text = getString(R.string.search_stopped, curCount)
+            status.text = getString(R.string.search_stopped, curCount) + variantSuffix()
         }
         box.addView(row)
         box.addView(row2)
@@ -1352,10 +1380,8 @@ class BookActivity : Activity() {
                     rebuild()
                     searchAdapter.notifyDataSetChanged()
                     status.text = if (final)
-                        getString(R.string.search_done, snapshot.size) +
-                            // M3.8：提示异体字展开已生效（表非空且开关开启）
-                            if (variantsOn && VariantsStore.current().isNotEmpty()) " · 异体字已展开" else ""
-                    else getString(R.string.search_progress, doneCount.get(), until - from, snapshot.size)
+                        getString(R.string.search_done, snapshot.size) + variantSuffix()
+                    else getString(R.string.search_progress, doneCount.get(), until - from, snapshot.size) + variantSuffix()
                     if (final) setSearching(false) // 扫描自然结束 → 按钮复原「搜索」
                 }
             }
@@ -1374,7 +1400,7 @@ class BookActivity : Activity() {
                 pool.submit {
                     try {
                         for (i in range) {
-                            if (searchCancelled || Thread.currentThread().isInterrupted || collected.size >= 500) break
+                            if (searchCancelled || Thread.currentThread().isInterrupted) break
                             val bytes = try {
                                 archive?.entryBytes(book.spine[i].path)
                             } catch (_: Exception) {
@@ -1383,7 +1409,7 @@ class BookActivity : Activity() {
                             val html = String(bytes, ZipPaths.detectCharset(bytes))
                             var ei = 0
                             for (m in ReaderHtml.BLOCK_PATTERN.findAll(html)) {
-                                if (searchCancelled || Thread.currentThread().isInterrupted || collected.size >= 500) break
+                                if (searchCancelled || Thread.currentThread().isInterrupted) break
                                 val text = ReaderHtml.extractVisibleText(m.groupValues[3])
                                 if (text.isEmpty()) { ei++; continue }
                                 val mm: IntRange? = if (isPlain) {
@@ -1409,6 +1435,7 @@ class BookActivity : Activity() {
         et.setOnEditorActionListener { _, actionId, _ ->
             if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH) { runSearch(); true } else false
         }
+        searchRerunHook = { runSearch() } // M3.10：供「异体字」开关切换后立即重搜
         val btn = android.widget.Button(this).apply {
             text = getString(R.string.search_btn)
             textSize = 13f
@@ -1649,17 +1676,6 @@ class BookActivity : Activity() {
         }
     }
 
-    /** 全屏沉浸（minSdk 31，直接用 WindowInsetsController），呼出=边缘滑动手势 */
-    private fun applyImmersive() {
-        val ic = window.insetsController ?: return
-        if (immersive) {
-            ic.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-            ic.hide(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
-        } else {
-            ic.show(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
-        }
-    }
-
     /** 页面主题样式（doLoad 注入，id=__theme 便于 __setTheme 热更新） */
     private fun themeCss(): String {
         val p = pal()
@@ -1712,7 +1728,7 @@ class BookActivity : Activity() {
     }
 
     private fun familyCss(): String = when (fontFam) {
-        "custom" -> if (hasCustomFont()) "'__Custom','Noto Sans CJK SC',sans-serif"
+        "custom" -> if (hasCustomFont()) ReaderHtml.fontStackCss(curBookFonts)
                     else "'Noto Sans CJK SC',sans-serif"
         "serif" -> "Georgia,'Noto Serif CJK SC','Source Han Serif SC',serif"
         "sans" -> "'Noto Sans CJK SC',sans-serif"
@@ -2335,12 +2351,11 @@ class BookActivity : Activity() {
             b.alpha = if (selected) 1f else 0.55f
         }
 
-        // M3：全部设置先存草稿，点「完成」才统一提交生效（主题/排版/边距/注释字号/沉浸）
+        // M3：全部设置先存草稿，点「完成」才统一提交生效（主题/排版/边距/注释字号）
         var dTheme = themeId
         var dFs = fontPx
         var dLh = lineH
         var dFam = fontFam
-        var dImm = immersive
         val dFn0 = ReaderPrefs.fnFont(this)
 
         // 主题
@@ -2491,17 +2506,6 @@ class BookActivity : Activity() {
         }
         box.addView(fontBtn)
 
-        // 全屏沉浸
-        val cb = CheckBox(this).apply {
-            text = getString(R.string.set_immersive)
-            textSize = 14f
-            isChecked = immersive
-            setOnClickListener {
-                dImm = isChecked // 仅草稿
-            }
-        }
-        box.addView(cb)
-
         val settingsDlg = AlertDialog.Builder(this, dialogTheme())
             .setTitle(R.string.settings_title)
             .setView(box)
@@ -2528,11 +2532,6 @@ class BookActivity : Activity() {
                     relayoutPreserve()
                 }
                 ReaderPrefs.setFnFont(this, dFn) // 弹注下次打开生效
-                if (dImm != immersive) {
-                    immersive = dImm
-                    ReaderPrefs.setImmersive(this, dImm)
-                    applyImmersive()
-                }
                 if (themeChanged) {
                     applyThemeChrome()
                     val p = pal()

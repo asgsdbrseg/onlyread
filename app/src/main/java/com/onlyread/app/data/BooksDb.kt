@@ -124,6 +124,53 @@ class BooksDb(context: Context) : SQLiteOpenHelper(context, "onlyread.db", null,
             if (c.moveToFirst()) c.getLong(0) else null
         }
 
+    /** M3.10：按身份指纹（首/尾 64KB SHA-1 + 长度）查已有书——同一文件改路径/改名后仍能识别 */
+    fun getIdByHash(hash: String): Long? =
+        readableDatabase.rawQuery("SELECT id FROM books WHERE identity_hash=?", arrayOf(hash)).use { c ->
+            if (c.moveToFirst()) c.getLong(0) else null
+        }
+
+    /** M3.10：旧记录路径归一为 canonical 写法（消除符号链接差异，后续去重按路径也能命中） */
+    fun updatePath(id: Long, path: String) {
+        writableDatabase.execSQL("UPDATE books SET path=? WHERE id=?", arrayOf(path, id))
+    }
+
+    /**
+     * M3.10：启动时归并历史重复记录（历史版本曾按原始路径字符串判重，
+     * `/sdcard/x.epub` 与 `/storage/emulated/0/x.epub` 会被当成两本书）。
+     * 按 canonical 路径分组，保留最早加入的一条：进度/目录迁移到保留行（保留行已有则丢弃重复行的），
+     * 重复行删除，保留行路径归一为 canonical 写法。返回移除的重复条数。
+     */
+    fun dedupeDuplicates(): Int {
+        data class Row(val id: Long, val path: String)
+        val all = ArrayList<Row>()
+        readableDatabase.rawQuery("SELECT id, path FROM books ORDER BY added_at, id", null).use { c ->
+            while (c.moveToNext()) all.add(Row(c.getLong(0), c.getString(1) ?: ""))
+        }
+        val kept = HashMap<String, Long>() // canonicalPath → 保留的 book id
+        var removed = 0
+        for (r in all) {
+            val canon = try { java.io.File(r.path).canonicalFile.absolutePath } catch (_: Exception) { r.path }
+            val first = kept[canon]
+            if (first == null) {
+                kept[canon] = r.id
+                if (canon != r.path) updatePath(r.id, canon) // 保留行路径归一
+            } else {
+                writableDatabase.execSQL(
+                    "UPDATE progress SET book_id=$first WHERE book_id=${r.id} " +
+                        "AND NOT EXISTS(SELECT 1 FROM progress WHERE book_id=$first)"
+                )
+                writableDatabase.execSQL(
+                    "UPDATE toc SET book_id=$first WHERE book_id=${r.id} " +
+                        "AND NOT EXISTS(SELECT 1 FROM toc WHERE book_id=$first)"
+                )
+                writableDatabase.delete("books", "id=?", arrayOf(r.id.toString()))
+                removed++
+            }
+        }
+        return removed
+    }
+
     fun insert(b: BookEntity): Long {
         val cv = ContentValues().apply {
             put("path", b.path)

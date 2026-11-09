@@ -141,4 +141,37 @@ class ReaderHtmlTest {
         assertEquals("div", matches[1].groupValues[1])
         assertEquals("乙", matches[1].groupValues[3])
     }
+
+    // ————— M3.10：书内 CSS 字体提取 —————
+
+    @Test
+    fun bookFontFamilies_extractsFromStyleInlineAndLinks() {
+        val html = "<head><style>body{font-family:'Book Serif', serif;}</style>" +
+            "<link rel=\"stylesheet\" href=\"css/common.css\"></head>" +
+            "<p style=\"font-family: 思源宋体, Georgia\">甲</p>"
+        val fonts = ReaderHtml.bookFontFamilies(html) { href ->
+            if (href == "css/common.css") ".x{font-family: \"Zpix Pixel\",monospace;}" else null
+        }
+        // 收集顺序：style 块 → 内联 style 属性 → link 外链 CSS；通用族 serif/monospace 不收
+        assertEquals(listOf("Book Serif", "思源宋体", "Georgia", "Zpix Pixel"), fonts)
+    }
+
+    @Test
+    fun bookFontFamilies_filtersUnsafeNames() {
+        val html = "<style>" +
+            ".a{font-family:evil)}" +               // 含括号（url()/calc() 逃逸面）→ 拦
+            ".b{font-family:x{y}" +                 // 含花括号 → 拦
+            ".c{font-family:Source Han Serif SC}" + // 合法（含空格）
+            "</style>"
+        val fonts = ReaderHtml.bookFontFamilies(html) { null }
+        assertEquals(listOf("Source Han Serif SC"), fonts)
+    }
+
+    @Test
+    fun fontStackCss_putsCustomFirstThenBookThenSystem() {
+        val stack = ReaderHtml.fontStackCss(listOf("Book Serif", "思源宋体"))
+        assertEquals("'__Custom','Book Serif','思源宋体','Noto Sans CJK SC',sans-serif", stack)
+        // 空书内字体时直接落系统兜底
+        assertEquals("'__Custom','Noto Sans CJK SC',sans-serif", ReaderHtml.fontStackCss(emptyList()))
+    }
 }

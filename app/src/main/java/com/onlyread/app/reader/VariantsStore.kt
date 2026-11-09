@@ -66,27 +66,51 @@ object VariantsStore {
 
     /**
      * 应用启动时调用一次：读盘并填充 [cache] 与 [lastError]。
-     * - 外部文件存在 → 原样读取、原样解析后缓存；
-     * - 外部文件不存在 → 使用 assets 内的同一份模板内容（仅此一种初始化情形）；
-     * - 读取失败 / JSON 非法 → 缓存空表并写入 [lastError]，不补充、不替换配置数据。
+     * - 外部文件读取成功且非空 → 原样解析、原样缓存；
+     * - 文件不存在 / 读取失败 / JSON 非法 / 内容为空 → **回退到 assets 内置模板**并写入
+     *   [lastError]（关联搜索不静默失效），不补充、不改写用户的文件；
      *
      * 之后搜索一律走 [current]，因此本方法返回后直到进程结束都不会再读盘。
+     * [lastError] 由搜索窗口打开时通过 [takeNotice] 取走提示一次。
      */
     fun loadOnStartup(context: Context) {
         lastError = null
+        fun tpl(): Map<String, List<String>> =
+            try { Variants.parse(templateJson(context)) } catch (_: Exception) { emptyMap() }
         val f = externalFile()
-        val json = try {
-            if (f.isFile) f.readText(Charsets.UTF_8) else templateJson(context)
-        } catch (e: Exception) {
-            lastError = "variants.json 读取失败，将按原词搜索：${e.message}"
-            cache = emptyMap()
+        if (!f.isFile) {
+            // 首次/无写权限/文件被删：直接使用内置模板
+            cache = tpl()
+            lastError = if (cache.isEmpty()) "内置异体字表不可用，将按原词搜索"
+            else "外部异体字表不可读，已使用内置表"
             return
         }
-        cache = try {
+        val json = try {
+            f.readText(Charsets.UTF_8)
+        } catch (e: Exception) {
+            cache = tpl()
+            lastError = "variants.json 读取失败（${e.message}），已回退内置表"
+            return
+        }
+        val parsed = try {
             Variants.parse(json)
         } catch (e: Exception) {
-            lastError = "variants.json 格式错误，将按原词搜索：${e.message}"
-            emptyMap()
+            cache = tpl()
+            lastError = "variants.json 格式错误（${e.message}），已回退内置表"
+            return
         }
+        if (parsed.isEmpty()) {
+            cache = tpl()
+            lastError = "variants.json 内容为空，已回退内置表"
+            return
+        }
+        cache = parsed
+    }
+
+    /** 搜索窗口打开时取走一次性提示（回退/不可读说明）；无提示返回 null，取后清空。 */
+    fun takeNotice(): String? {
+        val n = lastError
+        lastError = null
+        return n
     }
 }
