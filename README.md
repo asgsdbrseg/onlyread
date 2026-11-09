@@ -1,5 +1,7 @@
 # onlyread · Android EPUB 阅读器
 
+代码：hy4
+
 个人自用的 Android EPUB 阅读器，架构思路参考 Lithium / Reasily（仅借鉴设计，代码独立实现）。
 
 设计上有两条硬约束：**直引原文件**——EPUB 始终从原始路径读取，只登记绝对路径与内容指纹，不复制到应用私有目录；**零第三方依赖**——除 JVM 单测外只使用 Android 框架与 Kotlin 标准库，在任何网络环境下都能快速构建。
