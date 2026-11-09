@@ -142,36 +142,188 @@ class ReaderHtmlTest {
         assertEquals("乙", matches[1].groupValues[3])
     }
 
-    // ————— M3.10：书内 CSS 字体提取 —————
+    // ————— 6. 书内 CSS 字体提取与字体栈（M3.10 字体缺字回退） —————
 
     @Test
-    fun bookFontFamilies_extractsFromStyleInlineAndLinks() {
-        val html = "<head><style>body{font-family:'Book Serif', serif;}</style>" +
-            "<link rel=\"stylesheet\" href=\"css/common.css\"></head>" +
-            "<p style=\"font-family: 思源宋体, Georgia\">甲</p>"
-        val fonts = ReaderHtml.bookFontFamilies(html) { href ->
-            if (href == "css/common.css") ".x{font-family: \"Zpix Pixel\",monospace;}" else null
-        }
-        // 收集顺序：style 块 → 内联 style 属性 → link 外链 CSS；通用族 serif/monospace 不收
-        assertEquals(listOf("Book Serif", "思源宋体", "Georgia", "Zpix Pixel"), fonts)
+    fun bookFontFamilies_extractsFromStyleBlockAndAttr() {
+        val html = """
+            <html><head><style>
+              p{font-family:"古籍宋", 'Kaiti SC', serif;}
+              .rare{font-family: 異體字體 !important;}
+            </style></head>
+            <body><p style="font-family:'方正古体', sans-serif">正文</p></body></html>
+        """.trimIndent()
+        val fonts = ReaderHtml.bookFontFamilies(html, emptyList())
+        assertTrue(fonts.contains("古籍宋"))
+        assertTrue(fonts.contains("Kaiti SC"))
+        assertTrue(fonts.contains("異體字體"))
+        assertTrue(fonts.contains("方正古体"))
+        assertFalse("通用族不进回退链", fonts.contains("serif"))
+        assertFalse(fonts.contains("sans-serif"))
     }
 
     @Test
-    fun bookFontFamilies_filtersUnsafeNames() {
-        val html = "<style>" +
-            ".a{font-family:evil)}" +               // 含括号（url()/calc() 逃逸面）→ 拦
-            ".b{font-family:x{y}" +                 // 含花括号 → 拦
-            ".c{font-family:Source Han Serif SC}" + // 合法（含空格）
-            "</style>"
-        val fonts = ReaderHtml.bookFontFamilies(html) { null }
-        assertEquals(listOf("Source Han Serif SC"), fonts)
+    fun bookFontFamilies_readsExternalCssAndCapsAt24() {
+        val css = "body{font-family:'外部字体',serif;}"
+        val many = (1..30).map { "字$it" }
+        val css2 = "p{font-family:${many.joinToString(",")};}"
+        val fonts = ReaderHtml.bookFontFamilies("<p></p>", listOf(css, css2))
+        assertEquals("外部 CSS 字体名应被提取", "外部字体", fonts.first())
+        assertEquals("最多 24 个", 24, fonts.size)
     }
 
     @Test
-    fun fontStackCss_putsCustomFirstThenBookThenSystem() {
-        val stack = ReaderHtml.fontStackCss(listOf("Book Serif", "思源宋体"))
-        assertEquals("'__Custom','Book Serif','思源宋体','Noto Sans CJK SC',sans-serif", stack)
-        // 空书内字体时直接落系统兜底
-        assertEquals("'__Custom','Noto Sans CJK SC',sans-serif", ReaderHtml.fontStackCss(emptyList()))
+    fun bookFontFamilies_skipsCustomAndGeneric() {
+        val html = "<style>p{font-family:'__Custom', 正常字体, serif;}</style>"
+        assertEquals(listOf("正常字体"), ReaderHtml.bookFontFamilies(html, emptyList()))
+    }
+
+    @Test
+    fun bookFontFamilies_filtersInjectionCharacters() {
+        val html = "<style>p{font-family:'a}body{color:red', 正常字体;}</style>"
+        val fonts = ReaderHtml.bookFontFamilies(html, emptyList())
+        assertTrue(fonts.none { it.contains(";") || it.contains("}") || it.contains("{") })
+    }
+
+    @Test
+    fun fontStackCss_ordersCustomBookFontsThenSystem() {
+        val stack = ReaderHtml.fontStackCss("'__Custom'", listOf("古籍宋", "Kaiti SC"))
+        assertEquals("'__Custom','古籍宋','Kaiti SC','Noto Sans CJK SC',sans-serif", stack)
+    }
+
+    @Test
+    fun fontStackCss_withoutCustomStillHasFallback() {
+        assertEquals("'Noto Sans CJK SC',sans-serif", ReaderHtml.fontStackCss(null, emptyList()))
+    }
+
+    // ————— 6b. 链尾通用族按字族区分（M3.13：衬线不得退化成黑体） —————
+
+    @Test
+    fun fontStackCss_serifTailUsesSerifGenericFamily() {
+        val stack = ReaderHtml.fontStackCss(
+            "Georgia,'Noto Serif CJK SC'", listOf("古籍宋"), "serif"
+        )
+        assertEquals(
+            "Georgia,'Noto Serif CJK SC','古籍宋','Noto Serif CJK SC',serif",
+            stack
+        )
+        assertTrue("链尾必须是 serif", stack.endsWith(",serif"))
+        assertFalse("衬线栈中间不得出现黑体字体名", stack.contains("Noto Sans CJK SC"))
+    }
+
+    @Test
+    fun fontStackCss_genericFamilyOnlyAtTail() {
+        val stack = ReaderHtml.fontStackCss("'__Custom'", listOf("古籍宋", "Kaiti SC"), "serif")
+        // 通用族只能出现在末尾，否则会截断前面书内字体的逐字符回退
+        assertEquals(1, stack.split(",").count { it.trim() == "serif" })
+        assertTrue(stack.endsWith(",serif"))
+        assertTrue("书内字体仍在通用族之前", stack.indexOf("古籍宋") < stack.lastIndexOf("serif"))
+    }
+
+    @Test
+    fun fontStackCss_defaultTailStaysSansSerif() {
+        // 不传尾族时保持 M3.10/M3.12 行为，custom / 黑体不受影响
+        assertEquals(
+            "'__Custom','古籍宋','Noto Sans CJK SC',sans-serif",
+            ReaderHtml.fontStackCss("'__Custom'", listOf("古籍宋"))
+        )
+    }
+
+    // ————— 7. 书内 CSS 字体链前置（M3.11：自定义字体缺字回退到 CSS） —————
+
+    @Test
+    fun prependFontFamily_keepsBookFontChain() {
+        val css = "p{font-family:'古籍宋',serif;}"
+        assertEquals(
+            "p{font-family:'__Custom','古籍宋',serif;}",
+            ReaderHtml.prependFontFamily(css)
+        )
+    }
+
+    @Test
+    fun prependFontFamily_skipsFontFaceDefinition() {
+        val css = "@font-face{font-family:'古籍宋';src:url('a.ttf');}" +
+                "p{font-family:'古籍宋',serif;}"
+        val out = ReaderHtml.prependFontFamily(css)
+        assertTrue(
+            "@font-face 内的字体定义不得被改写",
+            out.startsWith("@font-face{font-family:'古籍宋';")
+        )
+        assertTrue(out.contains("p{font-family:'__Custom','古籍宋',serif;}"))
+    }
+
+    @Test
+    fun prependFontFamily_skipsAlreadyCustomAndInherit() {
+        val css = "p{font-family:'__Custom',serif;}q{font-family:inherit;}"
+        assertEquals(css, ReaderHtml.prependFontFamily(css))
+    }
+
+    @Test
+    fun prependFontFamily_preservesImportantAndOtherDeclarations() {
+        val css = "body{color:red;font-family:宋体,serif !important;}"
+        assertEquals(
+            "body{color:red;font-family:'__Custom',宋体,serif !important;}",
+            ReaderHtml.prependFontFamily(css)
+        )
+    }
+
+    @Test
+    fun prependFontFamily_ignoresCommentsAndNoDeclaration() {
+        val css = "body{color:red;}/* font-family: 宋体; */"
+        assertEquals(css, ReaderHtml.prependFontFamily(css))
+    }
+
+    @Test
+    fun prependFontFamily_patchesMultipleRulesInOrder() {
+        val css = "h1{font-family:KaiTi,serif;}p{font-family:FangSong,serif;}" +
+                "@font-face{font-family:'Embed';src:url('e.ttf');}"
+        val out = ReaderHtml.prependFontFamily(css)
+        assertEquals(
+            "h1{font-family:'__Custom',KaiTi,serif;}" +
+                    "p{font-family:'__Custom',FangSong,serif;}" +
+                    "@font-face{font-family:'Embed';src:url('e.ttf');}",
+            out
+        )
+    }
+
+    // ————— 8. M3.12：字体栈泛化（衬线/黑体与自定义字体同机制）与内联 CSS 改写 —————
+
+    @Test
+    fun prependFontFamily_acceptsCompositeStack() {
+        val css = "p{font-family:'古籍宋',serif;}"
+        val stack = "Georgia,'Noto Serif CJK SC','Source Han Serif SC'"
+        assertEquals(
+            "p{font-family:Georgia,'Noto Serif CJK SC','Source Han Serif SC','古籍宋',serif;}",
+            ReaderHtml.prependFontFamily(css, stack)
+        )
+    }
+
+    @Test
+    fun prependFontFamily_compositeStackSkipsWhenFirstFontAlreadyPresent() {
+        val css = "p{font-family:Georgia,宋体,serif;}"
+        val stack = "Georgia,'Noto Serif CJK SC'"
+        assertEquals(css, ReaderHtml.prependFontFamily(css, stack))
+    }
+
+    @Test
+    fun prependFontFamilyInHtml_patchesStyleBlockAndAttribute() {
+        val html = "<html><head><style>p{font-family:宋体,serif;}</style></head>" +
+                "<body><p style=\"font-family:'古籍宋',serif\">正文</p></body></html>"
+        val out = ReaderHtml.prependFontFamilyInHtml(html, "'__Custom'")
+        assertTrue(out.contains("p{font-family:'__Custom',宋体,serif;}"))
+        assertTrue(out.contains("style=\"font-family:'__Custom','古籍宋',serif\""))
+        assertTrue("正文不得丢失", out.contains("正文"))
+    }
+
+    @Test
+    fun prependFontFamilyInHtml_leavesNonFontStylesAndStructure() {
+        val html = "<p style=\"color:red;margin:0\">正文</p><img src=\"a.png\">"
+        assertEquals(html, ReaderHtml.prependFontFamilyInHtml(html, "'__Custom'"))
+    }
+
+    @Test
+    fun prependFontFamilyInHtml_blankStackIsNoop() {
+        val html = "<style>p{font-family:宋体;}</style>"
+        assertEquals(html, ReaderHtml.prependFontFamilyInHtml(html, ""))
     }
 }

@@ -12,7 +12,7 @@ android {
         minSdk = 31          // 决策 #13：最低支持 Android 12
         targetSdk = 35
         versionCode = 37
-        versionName = "0.4.21-m3"
+        versionName = "0.4.21"
     }
 
     // CI 签名：GitHub Actions 将密钥解码为 app/keystore.jks，凭据经环境变量注入

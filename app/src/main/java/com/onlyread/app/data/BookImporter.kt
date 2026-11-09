@@ -62,33 +62,43 @@ object BookImporter {
     /** 外部「打开方式」入口：严格解析后按绝对路径导入。 */
     fun importUri(context: Context, uri: Uri): Result = importFile(context, resolveFile(context, uri))
 
-    /** 绝对路径导入：解析元数据 → 登记 → 目录缓存 → 封面落盘。 */
+    /** 绝对路径导入：路径归一 → 去重 → 解析元数据 → 登记 → 目录缓存 → 封面落盘。 */
     fun importFile(context: Context, file: File): Result {
         val db = (context.applicationContext as App).db
-        // M3.10：canonical 归一——/sdcard 与 /storage/emulated/0 等符号链接写法视为同一文件
-        val canon = try { file.canonicalFile } catch (_: Exception) { file }
-        db.getIdByPath(canon.absolutePath)?.let { id ->
-            val title = db.getById(id)?.title ?: canon.nameWithoutExtension
-            return Result(id, title, "该书已在书架中", true)
+        // ⚠️ 路径归一化：外部「打开方式」经 file:///sdcard/... 或 provider 的 _data 列得到的路径，
+        // 与应用内文件浏览器遍历出的 /storage/emulated/0/... 常常只是同一文件的不同写法。
+        // canonicalFile 解析符号链接后两者一致，避免同一本书被登记两次。
+        val canonical = try { file.canonicalFile } catch (_: Exception) { file }
+        val path = canonical.absolutePath
+        val fallback = canonical.nameWithoutExtension
+
+        fun existing(id: Long, title: String): Result {
+            val t = db.getById(id)?.title ?: title
+            // 顺手把历史记录的路径归一到真实路径，后续直接打开不必再解析旧写法
+            db.updatePath(id, path)
+            return Result(id, t, "该书已在书架中", true)
         }
-        // M3.10：同一本书换路径/改名后按身份指纹（首/尾 64KB SHA-1 + 长度）仍能识别，
-        // 命中即复用旧记录并把路径归一，绝不重复插入书架（先于 EPUB 解析，快速返回）
-        val hash = Hashing.shortHash(canon)
-        db.getIdByHash(hash)?.let { id ->
-            val title = db.getById(id)?.title ?: canon.nameWithoutExtension
-            db.updatePath(id, canon.absolutePath)
-            return Result(id, title, "该书已在书架中", true)
-        }
-        EpubArchive(canon).use { archive ->
+
+        db.getIdByPath(path)?.let { return existing(it, fallback) }
+        // 兼容升级前按未归一路径登记的旧数据
+        db.getIdByPath(file.absolutePath)?.let { return existing(it, fallback) }
+
+        EpubArchive(canonical).use { archive ->
             val book = archive.parseBook()
                 ?: throw IllegalArgumentException("EPUB 解析失败：未找到有效的 OPF")
+            val identityHash = Hashing.shortHash(canonical)
+            // 内容指纹兜底：同一本书以不同路径（副本 / 不同文件管理器给的不同写法）导入时
+            // 也只登记一次，复用已有 id 直接打开。
+            db.getIdByIdentityHash(identityHash)?.let {
+                return existing(it, book.title.ifBlank { fallback })
+            }
             val entity = BookEntity(
                 id = 0,
-                path = canon.absolutePath,
-                size = canon.length(),
-                mtimeMs = canon.lastModified(),
-                identityHash = hash,
-                title = book.title.ifBlank { file.nameWithoutExtension },
+                path = path,
+                size = canonical.length(),
+                mtimeMs = canonical.lastModified(),
+                identityHash = identityHash,
+                title = book.title.ifBlank { fallback },
                 author = book.author,
                 language = book.language,
                 publisher = book.publisher,
@@ -98,6 +108,11 @@ object BookImporter {
                 lastReadAt = 0L
             )
             val id = db.insert(entity)
+            if (id < 0) {
+                // path UNIQUE 冲突（并发导入等）：复用已有记录，绝不留下半条数据
+                db.getIdByPath(path)?.let { return existing(it, entity.title) }
+                throw IllegalArgumentException("书籍登记失败：路径冲突")
+            }
             try {
                 db.replaceToc(
                     id,

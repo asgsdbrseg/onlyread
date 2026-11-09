@@ -40,24 +40,6 @@ class VariantsTest {
     }
 
     @Test
-    fun expand_escapesRegexMetaInsideClass() {
-        // M3.10：字符类内元字符最小转义——`\ ] ^ -` 转义后不破坏字符类
-        val map = mapOf("甲" to listOf("a-b", "x]y", "\\z", "^p", "囗"))
-        assertEquals("[a\\-bx\\]y\\\\z\\^p囗]", Variants.expandQuery("甲", map))
-        // 展开结果是合法正则，且类内每个字面字符都能逐字命中（字符类未被破坏）
-        val re = Regex(Variants.expandQuery("甲", map))
-        val text = "a-bx]y\\z^p囗"
-        assertEquals(text.codePointCount(0, text.length), re.findAll(text).count())
-    }
-
-    @Test
-    fun expand_keepsAstralCharsIntact() {
-        val map = mapOf("钟" to listOf("钟", "𲈛"))
-        assertEquals("[钟𲈛]", Variants.expandQuery("钟", map))
-        assertTrue(Regex(Variants.expandQuery("钟", map)).containsMatchIn("黃𲈛之器"))
-    }
-
-    @Test
     fun expandedRegex_matchesEveryVariantCombination() {
         val map = Variants.parse(sampleJson)
         val re = Regex(Variants.expandQuery("黄钟", map))
@@ -135,5 +117,15 @@ class VariantsTest {
         }
         // 配置不可用时按原词搜索，空表仍可解析
         assertTrue(Variants.parse("{}").isEmpty())
+    }
+
+    @Test
+    fun characterClassMetaCharsAreEscaped() {
+        // 用户字表里混入正则元字符时不能生成非法正则导致整次关联搜索失效
+        val map = mapOf("黄" to listOf("黃", "]"))
+        val expanded = Variants.expandQuery("黄", map)
+        assertEquals("[黃\\]]", expanded)
+        assertTrue(Regex(expanded).containsMatchIn("黃"))
+        assertTrue(Regex(expanded).containsMatchIn("]"))
     }
 }

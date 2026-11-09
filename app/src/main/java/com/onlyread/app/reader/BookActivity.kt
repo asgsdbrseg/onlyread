@@ -31,7 +31,6 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.BaseAdapter
 import android.widget.Button
-import android.widget.CheckBox
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -225,7 +224,7 @@ class BookActivity : Activity() {
                 ds.setProperty('font-size',px+'px','important');}
               else{ws.removeProperty('font-size');ds.removeProperty('font-size');}
               if(lh>0)ws.setProperty('line-height',lh,'important');else ws.removeProperty('line-height');
-              if(fam)ws.setProperty('font-family',fam,'important');else ws.removeProperty('font-family');
+              if(fam)ws.setProperty('font-family',fam,'');else ws.removeProperty('font-family');
               __meas();
               var pg=(anchor!==undefined&&anchor!==null&&anchor>=0)?__pageOfElem(anchor):-1;
               if(pg<0)pg=Math.min(__r.page,__r.total-1);
@@ -387,13 +386,13 @@ class BookActivity : Activity() {
 
     // M2：主题（全局）与排版（每书）
     private var themeId = ReaderPrefs.THEME_PAPER
-    // M3.10：搜索窗内「异体字」开关切换后立即重搜的钩子（runSearch 为局部函数，经此触发）
-    private var searchRerunHook: (() -> Unit)? = null
     private var fontPx = 0          // 0=书内默认
     private var lineH = 0.0         // 0=书内默认
+    // M3.11：资源拦截在 WebView 的 IO 线程读取，需保证可见性
+    @Volatile
     private var fontFam = ""        // ''=书内 / serif / sans / custom
-    // M3.10：当前章书内 CSS 字体名（loadSpine 后台提取，主线程读；供自定义字体缺字回退）
-    @Volatile private var curBookFonts: List<String> = emptyList()
+    // M3.10：当前书 CSS 声明的字体名（自定义字体缺字时按字符回退到它们），后台线程提取
+    private var bookFonts: List<String> = emptyList()
     private var mL = 16            // 左边距（CSS px，M2.2 可自定义）
     private var mR = 16            // 右边距
     private var mT = 34            // 上边距（含信息条预留）
@@ -444,8 +443,6 @@ class BookActivity : Activity() {
         setupTouch()
 
         themeId = ReaderPrefs.theme(this)
-        // M3.10：取消「全屏沉浸阅读」——系统栏保持常规显示，不再有隐藏/呼出状态
-
         mL = ReaderPrefs.marginL(this).coerceIn(0, 48)
         mR = ReaderPrefs.marginR(this).coerceIn(0, 48)
         mT = ReaderPrefs.marginT(this).coerceIn(0, 96)
@@ -456,7 +453,7 @@ class BookActivity : Activity() {
             if (nw <= 0 || nh <= 0) return@addOnLayoutChangeListener
             val changed = lastWvW > 0 && lastWvH > 0 && (nw != lastWvW || nh != lastWvH)
             lastWvW = nw; lastWvH = nh
-            // 尺寸变化（全屏切换等）→ 重测列距并按锚点复位；旋转/换章时 gotReport=false 自动拦截
+            // 尺寸变化（旋屏 / 窗口调整等）→ 重测列距并按锚点复位；换章时 gotReport=false 自动拦截
             if (changed && gotReport && !scrollMode) {
                 ui.removeCallbacks(relayoutPending)
                 ui.postDelayed(relayoutPending, 250)
@@ -775,20 +772,19 @@ class BookActivity : Activity() {
             // ⚠️ 繁重标记（多趟正则，大书/复杂书可达数百毫秒）放到后台线程：
             // 主线程只负责 geometry（廉价）+ loadDataWithBaseURL，打开/跳转不再冻结、空白期大幅缩短
             val markedHtml = ReaderHtml.markChapterForReader(rawHtml, item.path)
-            // M3.10：提取书内 CSS 字体名（后台线程；link 外链 CSS 从 zip 直读，最多 8 个），
-            // 供自定义字体缺字回退（'__Custom' → 书内字体 → 系统兜底）
-            val dir = item.path.substringBeforeLast('/', "")
-            val bookFonts = ReaderHtml.bookFontFamilies(rawHtml) { href ->
-                try {
-                    val target = ZipPaths.normalize(ZipPaths.join(dir, ZipPaths.decode(href.substringBefore('#'))))
-                    arch.entryBytes(target)?.let { String(it, ZipPaths.detectCharset(it)) }
-                } catch (_: Exception) {
-                    null
-                }
-            }
+            // M3.12：把当前字族前置到章节内联 <style> / style= 属性的 font-family 链，
+            // 与外链 CSS 的资源拦截通道同口径；custom / serif / sans 三种模式统一处理。
+            val stack = fontPrependStack()
+            val styledHtml = if (stack.isNotEmpty())
+                ReaderHtml.prependFontFamilyInHtml(markedHtml, stack) else markedHtml
+            // M3.10：书内 CSS 字体名在后台线程提取（含外链 CSS 读取），三种模式共用回退链
+            val fonts = ReaderHtml.bookFontFamilies(
+                rawHtml,
+                if (fontFam.isNotEmpty()) linkedCssTexts(arch, item.path, rawHtml) else emptyList()
+            )
             ui.post {
-                curBookFonts = bookFonts
-                awaitLayout { doLoad(index, anchor, item.path, markedHtml, charset) }
+                bookFonts = fonts
+                awaitLayout { doLoad(index, anchor, item.path, styledHtml, charset) }
             }
         }.start()
     }
@@ -840,13 +836,17 @@ class BookActivity : Activity() {
             "html,body{margin:0 !important;padding:0 !important;box-sizing:content-box !important;}" +
             "body{width:${pageW}px !important;overflow:hidden !important;}" +
             "#__wrap{width:${colW}px !important;padding-left:${mL}px !important;padding-top:${mT}px !important;" +
-            // M3.10：长网址/无空格长串可断行换行，不再溢出列宽与下一页文字重叠
-            "overflow-wrap:break-word !important;word-wrap:break-word !important;word-break:break-word;}" +
-            "#__wrap,#__wrap *{overflow-wrap:break-word;word-wrap:break-word;word-break:break-word;}" +
             "column-width:${colW}px !important;column-gap:${gap}px !important;height:${h2}px !important;" +
             "column-fill:auto !important;position:relative;box-sizing:content-box !important;}" +
-            "img,svg{max-width:100%;}body img,body svg{max-height:${h2 - 4}px;}" +
+            // M3.11：图片宽度上限 95vw，不加 !important（书内 CSS 可覆盖）；
+            // 高度保护同样不加 important，对齐/浮动/环绕完全跟随书内 CSS
+            "img,svg{max-width:95vw;}body img,body svg{max-height:${h2 - 4}px;}" +
             "table{max-width:100%;}" +
+            // M3.10：正文里的长网址等连续无空格串默认不在内部断行，超出列宽后被
+            // body{overflow:hidden} 裁掉，还会和下一页（下一栏）文字重叠。
+            // break-word 只在单词本身超过行宽时才断开，中文与常规西文排版不受影响。
+            "#__wrap,#__wrap *{overflow-wrap:break-word !important;word-wrap:break-word !important;" +
+            "word-break:break-word !important;}" +
             // M3：Reasily 式——正文中的注释块不进正文流（内容仍在 DOM，弹窗可取）
             "[data-fnhide]{display:none !important;}" +
             // M3.2：搜索命中注释块时展开显示（双属性选择器优先级高于单属性 fnhide）
@@ -1241,6 +1241,10 @@ class BookActivity : Activity() {
         }
         // M3.8：异体字展开开关（持久化）——按外部 variants.json 把字面查询展开为字符类
         var variantsOn = ReaderPrefs.variantsOn(this)
+        // M3.10：开关切换后立即用当前查询重新扫描；runSearch 在下方声明，用回调解耦声明顺序
+        var onVariantsToggle: () -> Unit = {}
+        // 启动时字表读取异常 / 回退内置表：本次打开搜索窗口提示一次
+        val variantsErr = VariantsStore.consumeError()
         val variantsBtn = android.widget.Button(this).apply {
             textSize = 12f
             isAllCaps = false
@@ -1249,9 +1253,7 @@ class BookActivity : Activity() {
                 variantsOn = !variantsOn
                 ReaderPrefs.setVariantsOn(this@BookActivity, variantsOn)
                 text = if (variantsOn) "异体字：开" else "异体字：关"
-                // M3.10：切换开关立即用当前查询重搜（结果口径立刻变化）；
-                // runSearch 是后文声明的局部函数，经字段 hook 延迟触发
-                searchRerunHook?.invoke()
+                onVariantsToggle()
             }
         }
         row.addView(et)
@@ -1264,11 +1266,6 @@ class BookActivity : Activity() {
             setTextColor(getColor(R.color.text_sub))
             setPadding(0, (8 * d).toInt(), 0, (4 * d).toInt())
         }
-        // M3.10：异体字回退/不可读提示——开窗展示一次（loadOnStartup 时机，取后清空）
-        VariantsStore.takeNotice()?.let { status.text = it }
-        // M3.10：异体字展开生效提示贯穿搜索各阶段（表非空且开关开启时）
-        fun variantSuffix(): String =
-            if (variantsOn && VariantsStore.current().isNotEmpty()) " · 异体字已展开" else ""
         val lv = android.widget.ListView(this)
         // M3：Reasily 式聚合展示——章节组头 + 命中片段行
         class G(val title: String)
@@ -1328,7 +1325,7 @@ class BookActivity : Activity() {
             searchPool?.shutdownNow()
             searchPool = null
             setSearching(false)
-            status.text = getString(R.string.search_stopped, curCount) + variantSuffix()
+            status.text = getString(R.string.search_stopped, curCount)
         }
         box.addView(row)
         box.addView(row2)
@@ -1344,6 +1341,10 @@ class BookActivity : Activity() {
             // M3.8：异体字展开——开关开启时按表把字面查询展开为字符类（如 黄钟 → [黄黃][钟锺…]）；
             // 查询含正则元字符视为用户手写正则，expandQuery 原样返回不改写
             val q = if (variantsOn) Variants.expandQuery(raw, VariantsStore.current()) else raw
+            // M3.10：点「搜索」后立即显示展开状态，并贯穿进度 / 完成 / 停止各阶段
+            val variantTip =
+                if (variantsOn && VariantsStore.current().isNotEmpty()) " · 异体字已展开" else ""
+            status.text = "搜索中…$variantTip"
             // M3：正则恒启用；无效正则直接提示
             val re = try {
                 Regex(q, RegexOption.IGNORE_CASE)
@@ -1380,8 +1381,9 @@ class BookActivity : Activity() {
                     rebuild()
                     searchAdapter.notifyDataSetChanged()
                     status.text = if (final)
-                        getString(R.string.search_done, snapshot.size) + variantSuffix()
-                    else getString(R.string.search_progress, doneCount.get(), until - from, snapshot.size) + variantSuffix()
+                        getString(R.string.search_done, snapshot.size) + variantTip
+                    else
+                        getString(R.string.search_progress, doneCount.get(), until - from, snapshot.size) + variantTip
                     if (final) setSearching(false) // 扫描自然结束 → 按钮复原「搜索」
                 }
             }
@@ -1432,10 +1434,13 @@ class BookActivity : Activity() {
                 }
             }
         }
+        // M3.10：切换「异体字」开关后，用当前查询立即重新扫描（无需再点一次「搜索」）
+        onVariantsToggle = {
+            if (et.text.toString().trim().isNotEmpty()) runSearch()
+        }
         et.setOnEditorActionListener { _, actionId, _ ->
             if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH) { runSearch(); true } else false
         }
-        searchRerunHook = { runSearch() } // M3.10：供「异体字」开关切换后立即重搜
         val btn = android.widget.Button(this).apply {
             text = getString(R.string.search_btn)
             textSize = 13f
@@ -1462,8 +1467,11 @@ class BookActivity : Activity() {
             searchPool = null
         }
         dlg.show()
+        // M3.10：字表异常 / 回退内置表时提示一次，用户可据此判断关联搜索用了哪份表
+        variantsErr?.let { Toast.makeText(this, it, Toast.LENGTH_LONG).show() }
         dlg.setCanceledOnTouchOutside(true) // 移除「取消」按钮后仍可点外部关闭
-        // 呼出输入法时窗口保持原位、不上移（Activity 已 adjustNothing，Dialog 需单独设置）
+        // 呼出输入法时窗口保持原位、不上移（Activity 已 adjustNothing，Dialog 需单独设置）。
+        // 目录窗口有 IME insets 压缩逻辑，搜索窗口按本版需求保持不动。
         dlg.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
         dlg.window?.setLayout(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -1646,7 +1654,7 @@ class BookActivity : Activity() {
     // 可见文本抽取（extractVisibleText）、行内标签判定（isInlineTag）、命中片段（buildSnippet）
     // 与章节注释块标记（markChapterForReader）已迁移至 ReaderHtml 纯函数对象，便于后台线程执行与单元测试。
 
-    // ————— M2：主题 / 沉浸式 / 排版 / 脚注 / 阅读设置 —————
+    // ————— M2：主题 / 排版 / 脚注 / 阅读设置 —————
 
     private fun pal(): Palette = PALETTES[themeId.coerceIn(0, PALETTES.size - 1)]
 
@@ -1708,7 +1716,7 @@ class BookActivity : Activity() {
         if (parts.isEmpty() && htmlRule.isEmpty() && famRules.isEmpty()) return ""
         // 只强制行距继承；⚠️ 不强制 font-size——书籍对 p/li 等的 em/百分比相对字号
         // （如 .jiao{font-size:.8em} 校注小字）必须保留，否则正文层级被拉平。
-        // 字族规则由 fontFamilyRules() 统一生成（含后代继承压制），与弹注同源。
+        // 字族规则由 fontFamilyRules() 统一生成（无 important 的兜底栈），与弹注同源。
         return "<style>" + fontFaceCss() + htmlRule +
             (if (parts.isNotEmpty()) "#__wrap{" + parts + "}" else "") +
             famRules +
@@ -1727,22 +1735,70 @@ class BookActivity : Activity() {
         return p.isNotEmpty() && File(p).exists()
     }
 
-    private fun familyCss(): String = when (fontFam) {
-        "custom" -> if (hasCustomFont()) ReaderHtml.fontStackCss(curBookFonts)
-                    else "'Noto Sans CJK SC',sans-serif"
-        "serif" -> "Georgia,'Noto Serif CJK SC','Source Han Serif SC',serif"
-        "sans" -> "'Noto Sans CJK SC',sans-serif"
-        else -> fontFam
+    /**
+     * M3.10：后台读取章节外链 CSS 文本（最多 8 个），供 [ReaderHtml.bookFontFamilies] 提取书内字体名。
+     * 书籍自带 CSS 由 WebView 经虚拟资源通道加载；这里额外读一次只为拿到声明过的字体族名，
+     * 读不到（外链写法怪异 / 条目缺失）时静默跳过，不影响渲染。
+     */
+    private fun linkedCssTexts(arch: EpubArchive, itemPath: String, html: String): List<String> {
+        if (!html.contains("<link", ignoreCase = true)) return emptyList()
+        val dir = itemPath.substringBeforeLast('/', "")
+        val out = ArrayList<String>()
+        val linkRe = Regex("(?is)<link\\b[^>]*>")
+        val relRe = Regex("(?i)\\brel\\s*=\\s*[\"']?([^\"'>\\s]+)")
+        val hrefRe = Regex("(?i)\\bhref\\s*=\\s*[\"']?([^\"'>\\s]+)")
+        for (tag in linkRe.findAll(html)) {
+            if (out.size >= 8) break
+            val t = tag.value
+            if ("stylesheet" !in (relRe.find(t)?.groupValues?.get(1)?.lowercase() ?: "")) continue
+            val href = hrefRe.find(t)?.groupValues?.get(1) ?: continue
+            if (href.startsWith("http:", true) || href.startsWith("https:", true)) continue
+            val path = ZipPaths.join(dir, ZipPaths.decode(href.substringBefore('#')))
+            val bytes = try {
+                arch.entryBytes(path)
+            } catch (_: Exception) {
+                null
+            } ?: continue
+            out += String(bytes, ZipPaths.detectCharset(bytes))
+        }
+        return out
     }
 
-    /** 字族规则单一来源：正文传 "#__wrap"，弹注传 "body"，两处不再各自维护口径。
-     *  font-family 可继承，但书籍 CSS 常对 p/span/li 显式指定字体（显式声明优先于继承），
-     *  故必须同时让全部后代继承，否则切成衬线/黑体后仍是书内字体。
+    /** M3.12：前置到书内 CSS `font-family` 声明前的字体栈。
+     *  三种模式（custom / serif / sans）走完全相同的机制：前置栈 → 书内字体链。
+     *  不含通用族（serif / sans-serif）——通用族放在链中间会截断书内回退链。
+     *  返回空表示「书内」模式或自定义字体文件缺失，完全沿用书籍 CSS。
+     *  M3.13：衬线前置栈补 `'Noto Serif'`（Android serif 族实际挂载的字体名），
+     *  提高设备命中率；匹配不到时浏览器自动跳过，不影响后面的书内回退链。 */
+    private fun fontPrependStack(): String = when (fontFam) {
+        "custom" -> if (hasCustomFont()) "'__Custom'" else ""
+        "serif" -> "Georgia,'Noto Serif','Noto Serif CJK SC','Source Han Serif SC'"
+        "sans" -> "'Noto Sans CJK SC'"
+        else -> ""
+    }
+
+    /** 根容器 / 热更新用的完整字体栈：前置栈 → 书内 CSS 字体 → 系统字体 → 链尾通用族。
+     *  M3.12：三种字族模式统一由 [fontPrependStack] 与 bookFonts 组装。
+     *  M3.13：链尾通用族按字族区分——衬线用 `serif`，黑体 / custom 用 `sans-serif`。
+     *  通用族恒在链尾，不截断书内字体的逐字符回退；中间系统字体亦按尾族选取，
+     *  否则衬线模式会被 `'Noto Sans CJK SC'` 提前命中而退化成黑体。 */
+    private fun familyCss(): String {
+        val head = fontPrependStack()
+        if (head.isEmpty()) return ""
+        val tail = if (fontFam == "serif") "serif" else "sans-serif"
+        return ReaderHtml.fontStackCss(head, bookFonts, tail)
+    }
+
+    /** 字族规则单一来源：正文传 "#__wrap"，弹注传 "body"。
+     *  M3.12：三种模式一致——只给根容器一条无 important 的兜底栈，不再用
+     *  `!important` + 后代 `inherit` 压制书内 CSS 的字体层级。书内 CSS 的
+     *  `font-family` 声明已由 prependFontFamily 前置当前字体栈，缺字时按书内
+     *  原本的字体链逐字符回退。
      *  @font-face 属文档级规则，由各文档自行调用 fontFaceCss() 注入，不在此重复。 */
-    private fun fontFamilyRules(selector: String): String =
-        if (fontFam.isEmpty()) ""
-        else selector + "{font-family:" + familyCss() + " !important;}" +
-            selector + " *{font-family:inherit !important;}"
+    private fun fontFamilyRules(selector: String): String {
+        val stack = familyCss()
+        return if (stack.isEmpty()) "" else selector + "{font-family:" + stack + ";}"
+    }
 
     /** M2.2：页边距变更（上下左右独立）——重载当前章节并锚定原位置（边距参与分页 CSS，必须整页重排） */
     private fun applyMargins(l: Int, r: Int, t: Int, b: Int) {
@@ -1826,22 +1882,22 @@ class BookActivity : Activity() {
         val p = pal()
         val fnFontPx = ReaderPrefs.fnFont(this).coerceIn(10, 24)
         // 字族与正文同源：fontFamilyRules("body") 统一生成（「书内」时不注入，沿用书籍 head 样式）；
-        // 规则内含后代继承压制，避免书籍 CSS 对 p/span/li 单独指定的字体盖过设置
+        // M3.12：三种模式均为无 important 的兜底栈，书内 CSS 的字体层级完整保留
         val popupCss = "<style>" + fontFaceCss() +
             // M3.7：弹注窗口改直角——压制书籍 CSS 可能给 html/body 设置的圆角/阴影
             "html,body{border-radius:0 !important;box-shadow:none !important;}" +
             "body{margin:0;padding:14px;background:${p.bg} !important;color:${p.text} !important;" +
             "font-size:${fnFontPx}px !important;line-height:1.65 !important;word-break:break-word;}" +
             fontFamilyRules("body") +
-            // 兜底：图片居中、限宽；脚注节点常被书籍 CSS 隐藏（aside），弹层内强制显示
-            "img,svg{max-width:100% !important;height:auto;display:block !important;" +
-            "margin-left:auto !important;margin-right:auto !important;float:none !important;}" +
+            // M3.11：取消图片强制居中（display:block / margin:auto / float:none 全部移除），
+            // 对齐与环绕完全跟随书内 CSS；仅保留 95vw 宽度上限且不加 !important
+            "img,svg{max-width:95vw;}" +
             "aside{display:block !important;}" +
             "a{color:${p.link};text-decoration:none;}" +
             "sup{font-size:.75em;}" +
             "blockquote{margin:.6em 0 .6em 1em;border-left:3px solid ${p.link};padding-left:.6em;}" +
             "</style>" +
-            // 弹注内点击：同样只认 epub:type="noteref" 注释类链接，就地刷新弹注；
+            // 弹注内点击：图片一律进图片查看器（与正文 __hitTest 同口径），注释类链接就地刷新弹注；
             // 普通链接不再误弹一层（弹注 WebView 本就不放行任何导航）。
             // 高度钩子：load/字体就绪/延迟重测后上报文档高度（主动定窗）
             "<script>" +
@@ -1868,8 +1924,15 @@ class BookActivity : Activity() {
             "var t=' '+String(v).toLowerCase().replace(/[^a-z0-9-]+/g,' ')+' ';" +
             "return t.indexOf(' noteref ')>=0||t.indexOf(' doc-noteref ')>=0;}" +
             "document.addEventListener('click',function(e){" +
-            "var a=e.target;while(a&&a.nodeType===1&&a.tagName!=='A')a=a.parentNode;" +
-            "if(!a||a.nodeType!==1)return;if(!__isNoteRef(a))return;" +
+            "var a=e.target;" +
+            "while(a&&a.nodeType===1&&a.tagName!=='A'&&a.tagName!=='IMG')a=a.parentNode;" +
+            "if(!a||a.nodeType!==1)return;" +
+            "if(a.tagName==='IMG'){" +
+            "var src=a.getAttribute('src')||'';if(!src)return;" +
+            "e.preventDefault();e.stopPropagation();" +
+            "var iu=src;try{iu=new URL(src,document.baseURI).href}catch(x){}" +
+            "try{ReaderBridge.onImage(String(iu))}catch(x){}return;}" +
+            "if(!__isNoteRef(a))return;" +
             "var href=a.getAttribute('href')||'';" +
             "if(!href)return;if(/^(mailto:|tel:)/i.test(href))return;" +
             "e.preventDefault();e.stopPropagation();" +
@@ -2378,7 +2441,7 @@ class BookActivity : Activity() {
         val fontVal = valueLabel()
         val fontSeek = SeekBar(this).apply {
             min = 14; max = 30
-            progress = if (fontPx in 14..30) fontPx else 20
+            progress = if (fontPx in 14..30) fontPx else 22
             fontVal.text = "${progress}px"
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
@@ -2528,6 +2591,15 @@ class BookActivity : Activity() {
                         mSeekL?.progress ?: oldML, mSeekR?.progress ?: oldMR,
                         mSeekT?.progress ?: oldMT, mSeekB?.progress ?: oldMB
                     ) // 内部已按锚点重排
+                } else if (dFam != oldFam) {
+                    // M3.12：字族变化必须重载章节——书内 CSS 的字体链前置发生在章节加载与
+                    // 资源拦截阶段，热更新（__setFont）改不到已加载的 CSS，会残留旧字体
+                    val a = when {
+                        curAnchor >= 0 -> Anchor.Elem(curAnchor, curPage)
+                        curTotal > 1 -> Anchor.Frac(curPage.toDouble() / (curTotal - 1))
+                        else -> Anchor.First
+                    }
+                    loadSpine(spineIndex, a)
                 } else if (typoChanged) {
                     relayoutPreserve()
                 }
@@ -2606,6 +2678,18 @@ class BookActivity : Activity() {
         val rel = ZipPaths.normalize(ZipPaths.decode(path.removePrefix("/book/$bookId/")))
         val bytes = archive?.entryBytes(rel) ?: return null
         val mime = ZipPaths.mimeTypeFor(rel)
+        // M3.12：所有字族模式统一——把当前字体的前置栈插到书内 CSS 的 font-family 链前，
+        // 缺字时按书内 CSS 原本指定的字体逐字符回退（「回退到 css」）。
+        if (mime == "text/css") {
+            val stack = fontPrependStack()
+            if (stack.isNotEmpty()) {
+                val patched = ReaderHtml.prependFontFamily(
+                    String(bytes, ZipPaths.detectCharset(bytes)), stack
+                )
+                val out = patched.toByteArray(Charsets.UTF_8)
+                return WebResourceResponse(mime, "utf-8", ByteArrayInputStream(out))
+            }
+        }
         val encoding =
             if (mime.startsWith("text/") || mime.contains("css") || mime.contains("xhtml") || mime.contains("xml")) "utf-8"
             else null

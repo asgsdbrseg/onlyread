@@ -166,64 +166,132 @@ object ReaderHtml {
         return if (p < 0) 0 else p
     }
 
-    // ————— M3.10：书内 CSS 字体提取与自定义字体缺字回退栈 —————
+    // ————— M3.10：书内 CSS 字体提取与字体栈（纯 JVM，供单元测试） —————
 
-    private val styleBlockRe = Regex("(?is)<style[^>]*>([\\s\\S]*?)</style>")
-    private val inlineStyleRe = Regex("(?is)style\\s*=\\s*\"([^\"]*)\"")
-    private val cssLinkRe = Regex("(?is)<link[^>]+rel\\s*=\\s*[\"']?stylesheet[\"']?[^>]*>")
-    private val cssHrefRe = Regex("(?is)href\\s*=\\s*[\"']([^\"']+)[\"']")
-    private val fontFamilyRe = Regex("(?is)font-family\\s*:\\s*([^;}]+)")
-    private val safeFontNameRe =
-        Regex("^[\\w\\u4e00-\\u9fff\\u3040-\\u30ff\\uac00-\\ud7af][\\w\\s\\u4e00-\\u9fff\\u3040-\\u30ff\\uac00-\\ud7af.-]*$")
-    private val genericFamilies =
-        setOf("serif", "sans-serif", "monospace", "cursive", "fantasy", "system-ui", "inherit", "initial", "unset")
+    private val STYLE_BLOCK_RE = Regex("(?is)<style\\b[^>]*>(.*?)</style\\s*>")
+    private val STYLE_ATTR_RE = Regex("(?is)\\bstyle\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)')")
+    private val FONT_FAMILY_RE = Regex("(?i)font-family\\s*:\\s*([^;}]+)")
+    private val IMPORTANT_RE = Regex("(?i)\\s*!important\\s*")
+    private val GENERIC_FONTS = setOf(
+        "serif", "sans-serif", "monospace", "cursive", "fantasy", "system-ui",
+        "inherit", "initial", "unset", "revert", "default", "ui-serif", "ui-sans-serif",
+        "ui-monospace", "math", "emoji", "fangsong"
+    )
+    private val FONT_NAME_RE = Regex("^[\\p{L}\\p{N} ._\\-]+$")
 
     /**
-     * 从章节 HTML 提取书内 CSS 字体名（最多 24 个，顺序保留）：
-     * 内联 `<style>`、`style="font-family:…"` 属性、`<link rel=stylesheet>` 外部 CSS
-     * （外链由 [resolveCss] 解析内容，最多取 8 个）。
+     * 从章节 HTML（内联 `<style>` 块、`style=` 属性）与外链 CSS 文本中提取书内声明的字体名。
+     * 按出现顺序去重，剔除通用族 / 非法字符 / 过长名称，最多 24 个。
      *
-     * 安全过滤：字体名会拼进 `font-family:` 值，只放行 字母/数字/CJK/空格/连字符/下划线/点
-     * 组成的名字（拦截 `}` `;` `(` 等 CSS 逃逸字符），通用族（serif 等）与超长名字不收。
+     * 用途：自定义字体不含某些生僻字、异体字时，让浏览器按字符逐个回退到书籍 CSS 指定的
+     * 专用字体（古籍常见做法），而不是落到同样缺字的系统字体显示豆腐块。
      */
-    fun bookFontFamilies(html: String, resolveCss: (String) -> String?): List<String> {
-        val sources = ArrayList<String>()
-        styleBlockRe.findAll(html).forEach { sources.add(it.groupValues[1]) }
-        inlineStyleRe.findAll(html).forEach { sources.add(it.groupValues[1]) }
-        var links = 0
-        val seen = HashSet<String>()
-        cssLinkRe.findAll(html).forEach { m ->
-            if (links >= 8) return@forEach
-            val href = cssHrefRe.find(m.value)?.groupValues?.get(1) ?: return@forEach
-            if (!seen.add(href.substringBefore('#'))) return@forEach
-            links++
-            resolveCss(href)?.let { sources.add(it) }
+    fun bookFontFamilies(html: String, cssTexts: List<String>): List<String> {
+        val sources = ArrayList<String>(cssTexts.size + 4)
+        STYLE_BLOCK_RE.findAll(html).forEach { sources += it.groupValues[1] }
+        STYLE_ATTR_RE.findAll(html).forEach { m ->
+            sources += if (m.groupValues[1].isNotEmpty()) m.groupValues[1] else m.groupValues[2]
         }
+        sources.addAll(cssTexts)
         val out = LinkedHashSet<String>()
-        outer@ for (s in sources) {
-            for (fm in fontFamilyRe.findAll(s)) {
-                for (one in fm.groupValues[1].split(',')) {
-                    var name = one.trim().trim('\'', '"').trim()
+        for (src in sources) {
+            for (decl in FONT_FAMILY_RE.findAll(src)) {
+                val body = IMPORTANT_RE.replace(decl.groupValues[1], "")
+                for (raw in body.split(',')) {
+                    val name = raw.trim().trim('\'', '"').trim()
                     if (name.isEmpty() || name.length > 64) continue
-                    if (name.lowercase() in genericFamilies) continue
-                    if (!safeFontNameRe.matches(name)) continue
-                    out.add(name)
-                    if (out.size >= 24) break@outer
+                    if (name.equals("__Custom", ignoreCase = true)) continue
+                    if (name.lowercase() in GENERIC_FONTS) continue
+                    if (!FONT_NAME_RE.matches(name)) continue
+                    out += name
+                    if (out.size >= 24) return out.toList()
                 }
             }
         }
         return out.toList()
     }
 
+    /** 生成字体栈 CSS 值：custom → 书内 CSS 字体 → 系统字体 → 链尾通用族。
+     *  M3.13：[tailFamily] 可配（衬线模式传 `serif`）。通用族恒在链尾，不会截断
+     *  前面书内字体的逐字符回退；中间系统字体按尾族选取，避免衬线模式被黑体名
+     *  提前命中。不传时保持 M3.10/M3.12 的 `sans-serif` 行为。 */
+    fun fontStackCss(custom: String?, bookFonts: List<String>, tailFamily: String = "sans-serif"): String {
+        val parts = ArrayList<String>(bookFonts.size + 3)
+        if (!custom.isNullOrBlank()) parts += custom
+        for (f in bookFonts.take(24)) {
+            parts += "'" + f.replace("\\", "\\\\").replace("'", "\\'") + "'"
+        }
+        parts += if (tailFamily == "serif") "'Noto Serif CJK SC'" else "'Noto Sans CJK SC'"
+        parts += tailFamily
+        return parts.joinToString(",")
+    }
+
+    // ————— M3.11：自定义字体缺字时「回退到 CSS」 —————
+
+    private val FONT_FACE_BLOCK_RE = Regex("(?is)@font-face\\s*\\{[^}]*\\}")
+    private val CSS_COMMENT_RE = Regex("(?s)/\\*.*?\\*/")
+    private val FONT_FAMILY_DECL_RE = Regex("(?i)(font-family\\s*:\\s*)([^;}]+)")
+    private val CSS_INHERIT_RE = Regex("(?i)^(inherit|initial|unset|revert|revert-layer)\\b")
+
     /**
-     * 自定义字体缺字回退栈：`'__Custom'` → 书内 CSS 字体（按出现顺序）→
-     * `'Noto Sans CJK SC'` → `sans-serif`。书内字体排在系统字体前——
-     * 自定义 TTF 覆盖不到的字形（生僻字、异体字）先借书内声明的字体，再落系统兜底。
+     * 把 [stack] 插到书内 CSS 每个 `font-family` 使用声明的最前面，其后**原封不动**
+     * 保留书内 CSS 的字体链。前置字体不含某字符时，浏览器按字符逐个回退到书内 CSS
+     * 原本为该元素指定的字体，而不是被一个全局统一字体栈抹平。
+     *
+     * @param stack 完整的 CSS font-family 值，如 `'__Custom'` 或
+     *   `Georgia,'Noto Serif CJK SC','Source Han Serif SC'`（不含通用族，避免截断书内回退链）。
+     *
+     * - `@font-face` 块内的 `font-family` 是「字体定义」而非「使用声明」，必须原样保留；
+     * - CSS 注释、`inherit`/`initial`/`unset`/`revert`、已含栈首字体名的值一律跳过；
+     * - 不改动 CSS 其余字节（`!important`、选择器、媒体查询等保持原样）。
      */
-    fun fontStackCss(bookFonts: List<String>): String {
-        val sb = StringBuilder("'__Custom'")
-        for (f in bookFonts) sb.append(",'").append(f).append('\'')
-        sb.append(",'Noto Sans CJK SC',sans-serif")
+    fun prependFontFamily(css: String, stack: String = "'__Custom'"): String {
+        if (css.isBlank() || stack.isBlank()) return css
+        val firstName = stack.substringBefore(',').trim().replace("'", "").trim()
+        val skipRanges = ArrayList<IntRange>()
+        FONT_FACE_BLOCK_RE.findAll(css).forEach { skipRanges += it.range }
+        CSS_COMMENT_RE.findAll(css).forEach { skipRanges += it.range }
+        val sb = StringBuilder(css.length + 64)
+        var cursor = 0
+        var patched = false
+        for (m in FONT_FAMILY_DECL_RE.findAll(css)) {
+            val start = m.range.first
+            if (skipRanges.any { start in it }) continue
+            val value = m.groupValues[2]
+            val trimmed = value.trim()
+            if (firstName.isNotEmpty() && trimmed.contains(firstName, ignoreCase = true)) continue
+            if (CSS_INHERIT_RE.containsMatchIn(trimmed)) continue
+            sb.append(css, cursor, start)
+            sb.append(m.groupValues[1]).append(stack).append(',').append(value)
+            cursor = m.range.last + 1
+            patched = true
+        }
+        if (!patched) return css
+        sb.append(css, cursor, css.length)
         return sb.toString()
+    }
+
+    private val STYLE_TAG_RE = Regex("""(?is)(<style\b[^>]*>)(.*?)(</style\s*>)""")
+    private val STYLE_ATTR_VAL_RE = Regex("""(?is)(\bstyle\s*=\s*)("[^"]*"|'[^']*')""")
+
+    /**
+     * 对章节 HTML 内联的 `<style>` 块与 `style=` 属性同样做 [prependFontFamily] 改写，
+     * 与外链 CSS（资源拦截通道）口径完全一致。EPUB 常把字体声明写在章节内联样式里，
+     * 只改写外链 CSS 会让这些元素漏掉前置字体。
+     *
+     * 只改 CSS 文本中的 `font-family` 声明，HTML 其余字节原样保留。
+     */
+    fun prependFontFamilyInHtml(html: String, stack: String): String {
+        if (html.isBlank() || stack.isBlank()) return html
+        var out = STYLE_TAG_RE.replace(html) { m ->
+            m.groupValues[1] + prependFontFamily(m.groupValues[2], stack) + m.groupValues[3]
+        }
+        out = STYLE_ATTR_VAL_RE.replace(out) { m ->
+            val quoted = m.groupValues[2]
+            val q = quoted[0].toString()
+            val body = quoted.substring(1, quoted.length - 1)
+            m.groupValues[1] + q + prependFontFamily(body, stack) + q
+        }
+        return out
     }
 }

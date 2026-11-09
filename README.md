@@ -96,7 +96,7 @@ Release 自动出现 `onlyread-0.1.0-m0.apk`。以后发版 = 打 tag。
 | 正式发版     | 推送 `v*` tag                                        | Release 自动发布 |
 | 改版本号     | 改 `app/build.gradle.kts` 的 versionName/Code 后打 tag | 新 Release    |
 
-## 本版调整（M3.7 / M3.8 / M3.9 / M3.10）
+## 本版调整（M3.7 / M3.8 / M3.9 / M3.10 / M3.11 / M3.12 / M3.13）
 
 - **弹注窗口取消圆角**：旧圆角来自 `panelBg()` 的 `GradientDrawable(cornerRadius=14dp)`，  
   但面板内 WebView 是不透明矩形且铺满面板，改 radius 既看不出也「去不掉」；另一条来源是  
@@ -163,6 +163,58 @@ Release 自动出现 `onlyread-0.1.0-m0.apk`。以后发版 = 打 tag。
 - **修复异体字关联搜索**：字表为空 / 读取失败 / JSON 非法时回退内置模板并提示一次（不再
   静默变空表）；字符类内正则元字符做最小转义；取消扫描结果 500 条上限；切换「异体字」
   开关立即用当前查询重搜；「异体字已展开」提示贯穿搜索各阶段。
+
+### M3.11 / 0.4.21 修正
+
+- **全文搜索窗口呼出输入法时保持不上移**：搜索 `AlertDialog` 用
+  `SOFT_INPUT_ADJUST_NOTHING`，输入法弹出后窗口保持原位（目录窗口另有 IME insets
+  压缩逻辑，搜索窗口按需求不跟随）。不用 `SOFT_INPUT_ADJUST_RESIZE`（API 35 已弃用）。
+- **弹注图片取消强制居中**：`popupCss` 移除 `display:block / margin:auto / float:none`
+  三条 `!important`，图片的对齐、浮动、文字环绕完全跟随书内 CSS。
+- **正文与弹注图片宽度口径统一**：两处均为 `img,svg{max-width:95vw;}`，且**不加
+  `!important`**（书内 CSS 可覆盖）；弹注同时去掉 `height:auto` 注入。
+- **自定义字体缺字回退到 CSS（重做）**：M3.10 的「统一字体栈 + `!important` 压制所有
+  后代」会抹掉书内 CSS 各元素自己的字体链与顺序，缺字仍落回系统字体。现改为在
+  `intercept()` 里对书内 CSS 调用纯函数 `ReaderHtml.prependFontFamily()`，把
+  `'__Custom'` 前置到**每一个** `font-family` 使用声明之前（跳过 `@font-face` 定义、
+  注释、`inherit`），原字体链与顺序完整保留；`fontFamilyRules` 去掉 `!important`
+  与后代继承压制，只保留根容器一条无 important 的兜底栈。
+- **版本**：`versionCode 37` / `versionName 0.4.21`。
+
+### M3.12 / 0.4.21 重打包修正（本次）
+
+- **衬线 / 黑体模式与自定义字体机制完全一致**：M3.11 只有 custom 走「前置字体栈 +
+  无 important 兜底栈」，衬线 / 黑体仍是 `!important` 全局替换 + 后代 `inherit` 压制。
+  现三种模式统一：`fontPrependStack()` 按当前字族给出前置栈（custom 为 `'__Custom'`、
+  衬线为 `Georgia,'Noto Serif CJK SC','Source Han Serif SC'`、黑体为
+  `'Noto Sans CJK SC'`，均不含通用族以免截断书内回退链），`familyCss()` 统一组装
+  「前置栈 → 书内 CSS 字体 → 系统中文字体 → sans-serif」，`fontFamilyRules` 对所有模式
+  只输出一条无 important 的兜底栈。外链 CSS 由 `intercept()` 改写，章节内联 `<style>`
+  与 `style=` 属性由新增纯函数 `ReaderHtml.prependFontFamilyInHtml()` 在后台线程改写，
+  两处口径一致；切换字族改为重载章节（前置发生在加载/拦截阶段，热更新改不到已加载的 CSS）。
+- **弹注内点击图片同样进入图片查看器**：弹注 `click` 监听原先只认 `<a>`，图片（包括
+  被 `<a>` 包裹的图片）点击被忽略。现按正文 `__hitTest` 同口径最内层优先识别 `IMG`，
+  把 `src` 解析为 `reader.local` 绝对地址交给 `ReaderBridge.onImage()` → `showImage()`。
+- **全文搜索界面保持不上移**：撤销 M3.11 曾加入的 IME insets 压缩窗口逻辑，恢复为
+  单纯 `SOFT_INPUT_ADJUST_NOTHING` + 80% 屏高，输入法弹出时窗口纹丝不动。
+- **版本**：仍为 `versionCode 37` / `versionName 0.4.21`（同版本重打包）。
+
+### M3.13 / 0.4.21 再重打包修正（本次）
+
+- **修复衬线字族显示成黑体**：M3.12 把三种字族统一成「前置栈 + 无 important
+  兜底栈」时，`fontStackCss` 的链尾无条件写成 `sans-serif`，链中间还插了
+  `'Noto Sans CJK SC'`；而衬线前置栈里的 `Georgia` / `Noto Serif CJK SC` /
+  `Source Han Serif SC` 在 Android WebView 里按字体名基本都匹配不到，于是中文
+  必然落到系统默认的思源黑体。现给 `fontStackCss` 增加链尾通用族参数：衬线模式
+  链尾用 `serif`、中间系统字体改用 `'Noto Serif CJK SC'`；黑体 / custom 仍用
+  `sans-serif`。通用族只在链尾出现，不截断书内 CSS 字体的逐字符回退；
+  `bookFontFamilies` 继续过滤通用族（书内声明里的 `serif` 由 `prependFontFamily`
+  原样保留在书内链中，无需混入兜底栈）。衬线前置栈另补 `'Noto Serif'` 提高
+  设备命中率。
+- **版本**：仍为 `versionCode 37` / `versionName 0.4.21`（同版本重打包）。
+- **已知局限**：Android 原生 `serif` 通用族主要覆盖拉丁字符，中文能否呈宋体取决于
+  ROM 是否提供衬线中文字体；若要跨设备保证中文衬线，需由 App 内置字体并通过
+  `@font-face` 注入。
 
 ## 异体字搜索（可编辑的 variants.json）
 

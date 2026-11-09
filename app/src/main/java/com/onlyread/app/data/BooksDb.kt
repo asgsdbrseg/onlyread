@@ -124,53 +124,6 @@ class BooksDb(context: Context) : SQLiteOpenHelper(context, "onlyread.db", null,
             if (c.moveToFirst()) c.getLong(0) else null
         }
 
-    /** M3.10：按身份指纹（首/尾 64KB SHA-1 + 长度）查已有书——同一文件改路径/改名后仍能识别 */
-    fun getIdByHash(hash: String): Long? =
-        readableDatabase.rawQuery("SELECT id FROM books WHERE identity_hash=?", arrayOf(hash)).use { c ->
-            if (c.moveToFirst()) c.getLong(0) else null
-        }
-
-    /** M3.10：旧记录路径归一为 canonical 写法（消除符号链接差异，后续去重按路径也能命中） */
-    fun updatePath(id: Long, path: String) {
-        writableDatabase.execSQL("UPDATE books SET path=? WHERE id=?", arrayOf(path, id))
-    }
-
-    /**
-     * M3.10：启动时归并历史重复记录（历史版本曾按原始路径字符串判重，
-     * `/sdcard/x.epub` 与 `/storage/emulated/0/x.epub` 会被当成两本书）。
-     * 按 canonical 路径分组，保留最早加入的一条：进度/目录迁移到保留行（保留行已有则丢弃重复行的），
-     * 重复行删除，保留行路径归一为 canonical 写法。返回移除的重复条数。
-     */
-    fun dedupeDuplicates(): Int {
-        data class Row(val id: Long, val path: String)
-        val all = ArrayList<Row>()
-        readableDatabase.rawQuery("SELECT id, path FROM books ORDER BY added_at, id", null).use { c ->
-            while (c.moveToNext()) all.add(Row(c.getLong(0), c.getString(1) ?: ""))
-        }
-        val kept = HashMap<String, Long>() // canonicalPath → 保留的 book id
-        var removed = 0
-        for (r in all) {
-            val canon = try { java.io.File(r.path).canonicalFile.absolutePath } catch (_: Exception) { r.path }
-            val first = kept[canon]
-            if (first == null) {
-                kept[canon] = r.id
-                if (canon != r.path) updatePath(r.id, canon) // 保留行路径归一
-            } else {
-                writableDatabase.execSQL(
-                    "UPDATE progress SET book_id=$first WHERE book_id=${r.id} " +
-                        "AND NOT EXISTS(SELECT 1 FROM progress WHERE book_id=$first)"
-                )
-                writableDatabase.execSQL(
-                    "UPDATE toc SET book_id=$first WHERE book_id=${r.id} " +
-                        "AND NOT EXISTS(SELECT 1 FROM toc WHERE book_id=$first)"
-                )
-                writableDatabase.delete("books", "id=?", arrayOf(r.id.toString()))
-                removed++
-            }
-        }
-        return removed
-    }
-
     fun insert(b: BookEntity): Long {
         val cv = ContentValues().apply {
             put("path", b.path)
@@ -296,6 +249,79 @@ class BooksDb(context: Context) : SQLiteOpenHelper(context, "onlyread.db", null,
         lineH = if (c.isNull(15)) 0.0 else c.getDouble(15),
         fontFamily = c.getString(16) ?: ""
     )
+
+    // ————— 导入去重（M3.10） —————
+
+    /** 同一内容指纹（首/尾 64KB SHA-1 + 长度）已登记 → 视为同一本书，直接复用 id。 */
+    fun getIdByIdentityHash(hash: String): Long? {
+        if (hash.isEmpty()) return null
+        return readableDatabase.rawQuery(
+            "SELECT id FROM books WHERE identity_hash=? ORDER BY id LIMIT 1", arrayOf(hash)
+        ).use { c -> if (c.moveToFirst()) c.getLong(0) else null }
+    }
+
+    /** 去重命中后把旧记录的路径归一到本次解析出的真实路径，保证后续直接打开有效。 */
+    fun updatePath(id: Long, path: String) {
+        val cv = ContentValues().apply { put("path", path) }
+        try {
+            writableDatabase.update("books", cv, "id=?", arrayOf(id.toString()))
+        } catch (_: Exception) {
+            // UNIQUE 冲突（该路径已被另一条记录占用）时保持原记录不动
+        }
+    }
+
+    /**
+     * 清理历史重复记录：同一 identity_hash 或同一 canonical 真实路径只保留 id 最小的一条。
+     * 旧版本仅按 path 字符串精确去重，/sdcard 与 /storage/emulated/0 指向同一文件时会出现两本书；
+     * 启动时一次性归并，避免升级后书架仍显示重复条目（连带清掉其进度/目录缓存）。
+     */
+    fun dedupeDuplicates() {
+        val db = writableDatabase
+        val toDelete = LinkedHashSet<Long>()
+        // ① 内容指纹相同
+        val groups = HashMap<String, MutableList<Long>>()
+        db.rawQuery(
+            "SELECT id, identity_hash FROM books WHERE identity_hash IS NOT NULL AND identity_hash<>'' ORDER BY id",
+            null
+        ).use { c ->
+            while (c.moveToNext()) {
+                val id = c.getLong(0)
+                val h = c.getString(1) ?: ""
+                groups.getOrPut(h) { ArrayList() }.add(id)
+            }
+        }
+        for (ids in groups.values) {
+            for (i in 1 until ids.size) toDelete += ids[i]
+        }
+        // ② 真实路径相同（符号链接 / 不同 provider 写法）
+        val seen = HashMap<String, Long>()
+        db.rawQuery("SELECT id, path FROM books ORDER BY id", null).use { c ->
+            while (c.moveToNext()) {
+                val id = c.getLong(0)
+                val p = c.getString(1) ?: ""
+                if (p.isEmpty()) continue
+                val key = try {
+                    java.io.File(p).canonicalPath
+                } catch (_: Exception) {
+                    p
+                }
+                val prev = seen[key]
+                if (prev == null) seen[key] = id else if (id != prev) toDelete += id
+            }
+        }
+        if (toDelete.isEmpty()) return
+        db.beginTransaction()
+        try {
+            for (id in toDelete) {
+                db.delete("books", "id=?", arrayOf(id.toString()))
+                db.delete("progress", "book_id=?", arrayOf(id.toString()))
+                db.delete("toc", "book_id=?", arrayOf(id.toString()))
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
 
     // ————— 每书排版参数（M2） —————
 

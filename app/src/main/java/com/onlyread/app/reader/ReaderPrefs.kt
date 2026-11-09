@@ -3,7 +3,7 @@ package com.onlyread.app.reader
 import android.content.Context
 
 /**
- * M2 全局阅读偏好：主题（白/纸/夜）与沉浸式开关，SharedPreferences 存储；
+ * M2 全局阅读偏好：主题（白/纸/夜），SharedPreferences 存储；
  * 排版参数（字号/行距/字族）按书存 books 表（决策 #17），见 BooksDb.saveTypography。
  */
 object ReaderPrefs {
@@ -44,8 +44,6 @@ object ReaderPrefs {
     fun theme(c: Context): Int = sp(c).getInt("theme", THEME_PAPER)
     fun setTheme(c: Context, t: Int) = sp(c).edit().putInt("theme", t).apply()
 
-    // M3.10：取消「全屏沉浸阅读」，immersive 偏好与开关一并移除，系统栏保持常规显示
-
     // M2.2：页边距（CSS px，上下左右独立）；M3 默认 10/10/30/30
     fun marginL(c: Context): Int = sp(c).getInt("margin_l", 10)
     fun marginR(c: Context): Int = sp(c).getInt("margin_r", 10)
@@ -57,8 +55,6 @@ object ReaderPrefs {
 
     // M2.2：全局排版（所有书共享；0/0/''=书内默认）
     // M3.10：默认字号 22px
-    // M3.10：取消「全屏沉浸阅读」，immersive 偏好与开关一并移除，系统栏保持常规显示
-
     fun fontSize(c: Context): Int = sp(c).getInt("font_px", 22)
     fun setFontSize(c: Context, v: Int) = sp(c).edit().putInt("font_px", v).apply()
 
