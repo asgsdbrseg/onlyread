@@ -333,19 +333,30 @@ class EpubArchive(file: File) : Closeable {
 
     private data class RawToc(val title: String, val path: String, val frag: String?, val level: Int, val baseDir: String)
 
-    /** EPUB2 NCX navMap：navPoint 栈式解析（流由 use 关闭） */
+    /**
+     * EPUB2 NCX navMap：navPoint 栈式解析（流由 use 关闭）。
+     *
+     * 0.4.25：必须【前序】入表——在 START_TAG 就把节点加进结果集，END_TAG 只弹栈。
+     * 旧实现在 `</navPoint>` 才写入（后序），父 navPoint 会排到它所有子 navPoint 之后：
+     * 例如「第一编 绪论」含 5 个章时，输出变成 …前言, 第一章…第五章, 第一编…
+     * 目录 UI 按 level 递进折叠，就把这 5 章错挂成「前言」的子级。
+     */
     private fun parseNcx(input: InputStream?, baseDir: String): List<RawToc> {
         if (input == null) return emptyList()
         return input.use { ins ->
             val parser = newParser(ins) ?: return@use emptyList()
-            val out = ArrayList<RawToc>()
+            val nodes = ArrayList<Node>()
             val stack = ArrayDeque<Node>()
             var inNavLabel = false
             try {
                 while (moveTo(parser)) {
                     when (parser.eventType) {
                         XmlPullParser.START_TAG -> when (localName(parser)) {
-                            "navpoint" -> stack.addLast(Node())
+                            "navpoint" -> {
+                                val n = Node(stack.size.coerceAtMost(5))
+                                stack.addLast(n)
+                                if (nodes.size < 3000) nodes.add(n) // 父先于子，顺序即文档顺序
+                            }
                             "navlabel" -> inNavLabel = true
                             "text" -> if (inNavLabel && stack.isNotEmpty() && stack.last().title == null) {
                                 val t = readText(parser)
@@ -361,17 +372,7 @@ class EpubArchive(file: File) : Closeable {
                         }
                         XmlPullParser.END_TAG -> when (localName(parser)) {
                             "navlabel" -> inNavLabel = false
-                            "navpoint" -> {
-                                if (stack.isNotEmpty()) {
-                                    val n = stack.removeLast()
-                                    val level = stack.size.coerceAtMost(5)
-                                    val t = n.title
-                                    val s = n.src
-                                    if (t != null && s != null && out.size < 3000) {
-                                        out.add(RawToc(t, s, n.frag, level, baseDir))
-                                    }
-                                }
-                            }
+                            "navpoint" -> if (stack.isNotEmpty()) stack.removeLast()
                         }
                     }
                 }
@@ -379,7 +380,11 @@ class EpubArchive(file: File) : Closeable {
                 // 畸形 NCX：返回已解析部分，但留下可排查痕迹
                 Logx.w(TAG, "NCX 解析中断，使用已解析部分", e)
             }
-            out
+            nodes.mapNotNull { n ->
+                val t = n.title
+                val src = n.src
+                if (t != null && src != null) RawToc(t, src, n.frag, n.level, baseDir) else null
+            }
         }
     }
 
@@ -457,7 +462,7 @@ class EpubArchive(file: File) : Closeable {
         }
     }
 
-    private class Node {
+    private class Node(val level: Int) {
         var title: String? = null
         var src: String? = null
         var frag: String? = null

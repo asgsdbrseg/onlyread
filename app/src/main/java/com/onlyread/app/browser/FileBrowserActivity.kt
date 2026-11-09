@@ -127,6 +127,10 @@ class FileBrowserActivity : Activity() {
             }
             ui.post {
                 Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+                // 0.4.28：导入结束即通知书架立即刷新（封面/最近在读顺序），不再单纯
+                // 依赖 MainActivity.onResume。重复导入不自动 finish，用户按返回键退出时
+                // 同样会把结果带回；导入失败则不触发刷新。
+                if (!msg.startsWith("导入失败")) setResult(RESULT_OK)
                 if (msg.startsWith("已导入")) finish()
             }
         }.start()

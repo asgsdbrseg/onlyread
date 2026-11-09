@@ -135,8 +135,16 @@ class BookActivity : Activity() {
             function __lastRight(){var els=__els();
               for(var i=els.length-1;i>=0;i--){var r=els[i].getBoundingClientRect();
               if(r.width>0||r.height>0)return r.right;}return 0;}
+            /** 0.4.25：归零根滚动。WebView 对同文档 # 锚点的原生导航会改
+             *  documentElement.scrollLeft，与 wrap 的 transform 叠加后整屏分栏错位
+             *  （两栏同时露出 / 文字被裁）；每次 __apply 都强制回到 (0,0)。 */
+            function __resetScroll(){
+              try{window.scrollTo(0,0);}catch(e){}
+              try{var d=document.documentElement;d.scrollLeft=0;d.scrollTop=0;}catch(e){}
+              try{document.body.scrollLeft=0;document.body.scrollTop=0;}catch(e){}}
             function __apply(){var el=window.__wrapEl;if(!el)return;
-              el.style.setProperty('transform','translateX('+(-__r.page*__r.W)+'px)','important');}
+              el.style.setProperty('transform','translateX('+(-__r.page*__r.W)+'px)','important');
+              __resetScroll();}
             function __meas(){__setupGeom();var wr=__wrap();
               wr.style.setProperty('transform','none','important');
               var t1=Math.max(1,Math.round((wr.scrollWidth+__r.M)/__r.W));
@@ -176,6 +184,44 @@ class BookActivity : Activity() {
               var pg=Math.floor((x-__r.M)/__r.W);
               if(!(pg>=0))pg=0;if(pg>__r.total-1)pg=__r.total-1;
               return pg;}
+            // ————— 0.4.24：全文搜索命中词精确定位 —————
+            // 旧实现把 data-srch0 加在整个命中【块】上，再用 getBoundingClientRect() 换算页码。
+            // 但 CSS 多列下跨列块是 fragmented element：getBoundingClientRect() 返回所有列
+            // 碎片的【并集】，left 恒取最左碎片（块起始列）。命中词在块中部/后部时，
+            // 算出的页码会大幅提前；章节越长、块跨列越多越明显（>50 页时尤其突出）。
+            // 且 fonts.ready 后的 __reanchor 用同一锚反复重定位，把页面持续拉回块起始列。
+            // 现改为优先用命中词内联 <mark> 的首个 clientRect —— 命中词真实所在列。
+            function __hitRect(fe){
+              if(!fe)return null;
+              var t=null;
+              try{t=fe.querySelector('[data-srch-hit]');}catch(e){}
+              if(!t){try{t=fe.querySelector('mark.__srch');}catch(e){}}
+              if(!t&&fe.getAttribute&&fe.getAttribute('data-srch-hit')!==null)t=fe;
+              // 隐藏注释命中时正文注入的是「引用块」，无命中 mark → 取引用链接所在处
+              if(!t){try{t=fe.querySelector('a[href]');}catch(e){}}
+              if(!t)t=fe;
+              var r=null,rs=null;
+              try{rs=t.getClientRects();if(rs&&rs.length)r=rs[0];}catch(e){}
+              if(!r){try{r=t.getBoundingClientRect();}catch(e){}}
+              // 目标仍在 data-fnhide 内（rect 全零）→ 现场解除隐藏并重测
+              if(r&&r.width===0&&r.height===0){
+                var anc=t;
+                while(anc&&anc.nodeType===1){
+                  if(anc.getAttribute&&anc.getAttribute('data-fnhide')!==null){
+                    anc.removeAttribute('data-fnhide');__meas();
+                    rs=null;r=null;
+                    try{rs=t.getClientRects();if(rs&&rs.length)r=rs[0];}catch(e){}
+                    if(!r){try{r=t.getBoundingClientRect();}catch(e){}}
+                    break;}
+                  anc=anc.parentNode;}}
+              return r;}
+            /** 命中词所在页（内容坐标）；跨列块也精确，不会被碎片并集带偏。 */
+            function __pageOfHit(fe){
+              var r=__hitRect(fe);if(!r)return -1;
+              var x=r.left+__r.page*__r.W;
+              var pg=Math.floor((x-__r.M)/__r.W);
+              if(!(pg>=0))pg=0;if(pg>__r.total-1)pg=__r.total-1;
+              return pg;}
             /** 按目录标题文本找首个匹配块：优先精确相等，跳过整章级大容器。 */
             function __findByText(t){var es=__els();
               var tt=String(t||'').replace(/\s+/g,'');if(!tt)return null;
@@ -207,9 +253,13 @@ class BookActivity : Activity() {
               else if(a.frag!==undefined&&a.frag!==null){
                 // 0.4.23：先按真实锚 id 命中（目录/交叉引用），避免被残留的
                 // data-srch0 拽回上一次搜索命中处；仅搜索专用锚(srch0)走属性回退。
-                var fe=null;try{fe=document.getElementById(a.frag);}catch(e){}
-                if(!fe){try{fe=document.querySelector('[data-srch0]');}catch(e){}}
-                if(fe){var p4=__pageOfNode(fe);if(p4>=0&&p4!==__r.page)__go(p4);}}
+                // 0.4.24：搜索锚必须用命中词精确定位，否则跨列块会把重排后的
+                // 落地页再次拉回块起始列（「比命中页提前」的根本原因之一）。
+                // 0.4.27：__pageOfAnchor 兼容 name 锚 / 编码 frag / 空锚点，避免落章首
+                var p4=__pageOfAnchor(a.frag);
+                if(p4<0){var se=null;try{se=document.querySelector('[data-srch0]');}catch(e){}
+                  if(se)p4=__pageOfHit(se);}
+                if(p4>=0&&p4!==__r.page)__go(p4);}
               else if(a.text!==undefined&&a.text!==null){
                 var ft=window.__tocHit||__findByText(a.text);window.__tocHit=ft;
                 if(ft){var p5=__pageOfNode(ft);if(p5>=0&&p5!==__r.page)__go(p5);}}}
@@ -221,10 +271,12 @@ class BookActivity : Activity() {
                 var p=__pageOfElem(anchor.elem);pg=p>=0?p:Math.max(0,Math.min(anchor.fb||0,__r.total-1));}
               else if(anchor&&anchor.frac!==undefined){pg=Math.round(anchor.frac*(__r.total-1));}
               else if(anchor&&anchor.frag){
-                // 同文件多标题/搜索锚：先按真实 id 命中，未命中才回退 data-srch0
-                var fe=null;try{fe=document.getElementById(anchor.frag);}catch(e){}
-                if(!fe){try{fe=document.querySelector('[data-srch0]');}catch(e){}}
-                pg=__pageOfNode(fe);if(pg<0)pg=0;}
+                // 同文件多标题/搜索锚：先按真实 id/name 命中，未命中才回退 data-srch0
+                // 0.4.27：__pageOfAnchor 兼容 <a name="fn1">、编码 frag 与空锚点
+                pg=__pageOfAnchor(anchor.frag);
+                if(pg<0){var se=null;try{se=document.querySelector('[data-srch0]');}catch(e){}
+                  if(se)pg=__pageOfHit(se);}
+                if(pg<0)pg=0;}
               else if(anchor&&anchor.text){
                 // 0.4.23：无 #frag 的同文件多标题——按标题文本定位到首个匹配块所在页
                 var ft=__findByText(anchor.text);window.__tocHit=ft;
@@ -279,10 +331,18 @@ class BookActivity : Activity() {
               if(!v){
                 var h=String(a.getAttribute('href')||'');
                 if(h.charAt(0)!=='#')return false;
-                var t=null;
-                try{t=document.getElementById(decodeURIComponent(h.slice(1)));}catch(e){}
-                if(!t){try{t=document.getElementById(h.slice(1));}catch(e){}}
+                // 0.4.27：统一走 __findAnchor，兼容 <a name="fn1"> 与编码 frag
+                var t=__findAnchor(h.slice(1));
                 if(!t)return false;
+                // 0.4.26：markChapterForReader 现在只给「标准注释容器」（<aside> /
+                // epub:type=footnote|note|endnote|rearnote）标 data-fnhide。带该属性即说明
+                // 目标是真注释 → 就地弹层，绝不解除隐藏翻页（解除会整章重排错位）。
+                // EPUB2 裸注释目标已从 0.4.26 起不再隐藏，不带此属性，故落到下面的
+                // 类型判定返回 false，由 __goFrag 按内容坐标直接翻页跳转。
+                var q=t;
+                while(q&&q.nodeType===1){
+                  if(q.getAttribute&&q.getAttribute('data-fnhide')!==null)return true;
+                  q=q.parentNode;}
                 var tv='',tg=t.tagName||'';
                 try{tv=t.getAttribute('epub:type')||'';}catch(e){}
                 if(!tv){try{tv=(t.getAttributeNS&&t.getAttributeNS('http://www.idpf.org/2007/ops','type'))||'';}catch(e){}}
@@ -292,24 +352,67 @@ class BookActivity : Activity() {
               var t=' '+String(v).toLowerCase().replace(/[^a-z0-9-]+/g,' ')+' ';
               return t.indexOf(' noteref ')>=0||t.indexOf(' doc-noteref ')>=0;
             }
+            // 0.4.27：统一锚点查找。EPUB2 常用 <a name="fn1"> 而非 id，且 Uri.fragment
+            // 可能是百分号编码；旧 getElementById 单一路径找不到目标时，跨章跳转的
+            // Anchor.Frag 分支会 __pageOfNode(null)=-1 → pg=0，表现为「跳到章节开头」。
+            // 依次尝试：原始 / 解码 / 编码 id、同名 name、属性选择器（JSON.stringify
+            // 负责转义），最后由调用方回退 data-srch0（搜索专用锚）。
+            function __findAnchor(id){
+              if(id===undefined||id===null)return null;
+              var s=String(id),ids=[s];
+              try{var d=decodeURIComponent(s);if(d&&d!==s)ids.push(d);}catch(e){}
+              try{var e2=encodeURIComponent(s);if(e2&&e2!==s)ids.push(e2);}catch(e){}
+              for(var k=0;k<ids.length;k++){
+                var v=ids[k],el=null;
+                try{el=document.getElementById(v);}catch(e){}
+                if(el)return el;
+                try{var ns=document.getElementsByName(v);if(ns&&ns.length)return ns[0];}catch(e){}
+                try{el=document.querySelector('[id='+JSON.stringify(v)+']');}catch(e){}
+                if(el)return el;
+                try{el=document.querySelector('[name='+JSON.stringify(v)+']');}catch(e){}
+                if(el)return el;
+              }
+              return null;
+            }
+            /** 0.4.27：按锚 id/name 算页码。空锚点 <a name="fn1"></a> 单独成行时
+             *  rect 为 0×0 且落在上一列末尾，直接换算会停在注释正文的前一页；
+             *  此时改用紧随其后的可见块级兄弟（注释正文）定位。 */
+            function __pageOfAnchor(id){
+              var el=__findAnchor(id);if(!el)return -1;
+              var pg=__pageOfHit(el),r=null;
+              try{r=el.getBoundingClientRect();}catch(e){}
+              var empty=(!r||r.width<=0);
+              if(!empty){try{
+                if(String(el.textContent||'').replace(/\s+/g,'')===''&&
+                   (!el.children||el.children.length===0))empty=true;
+              }catch(e){}}
+              if(empty){
+                var nx=el.nextElementSibling||el.nextSibling,guard=0;
+                while(nx&&guard++<6){
+                  if(nx.nodeType===1){
+                    var nr=null;try{nr=nx.getBoundingClientRect();}catch(e){}
+                    if(nr&&(nr.width>0||nr.height>0)){pg=__pageOfHit(nx);break;}
+                  }
+                  nx=nx.nextElementSibling||nx.nextSibling;
+                }
+              }
+              return pg;
+            }
             // 普通同文档锚点链接：按内容坐标换算页码翻页，不交给 WebView 原生锚点滚动
             // （横向分栏 + transform 下原生滚动会把版面滚乱）。
             window.__goFrag=function(id){
-              var el=null;
-              try{el=document.getElementById(decodeURIComponent(id));}catch(e){}
-              if(!el){try{el=document.getElementById(id);}catch(e){}}
+              __resetScroll();
+              var el=__findAnchor(id);
               if(!el)return false;
-              var r=el.getBoundingClientRect();
-              // 目标块可能被注释隐藏规则标记（data-fnhide）：现场解除，
-              // 否则 rect 全零算出的页码无意义，且跳过去也看不到内容
-              if(r.width<=0&&r.height<=0){var anc=el;
-                while(anc&&anc.nodeType===1){
-                  if(anc.getAttribute&&anc.getAttribute('data-fnhide')!==null){
-                    anc.removeAttribute('data-fnhide');__meas();r=el.getBoundingClientRect();break;}
-                  anc=anc.parentNode;}}
-              var x=r.left+__r.page*__r.W;
-              var pg=Math.floor((x-__r.M)/__r.W);
-              if(pg<0)pg=0;if(pg>__r.total-1)pg=__r.total-1;
+              // 0.4.26：仍带 data-fnhide 的只可能是标准注释容器（其链接已由 __isNoteRef
+              // 拦成弹注，正常不会走到这里）；万一走到也绝不解除隐藏后翻页——解除会让
+              // 正文流变长、整章重新分页，叠加原生 fragment 滚动即造成分栏错位。
+              // EPUB2 裸注释目标不再隐藏，直接落到下面的 __pageOfHit 按内容坐标翻页跳转。
+              var a=el;
+              while(a&&a.nodeType===1){
+                if(a.getAttribute&&a.getAttribute('data-fnhide')!==null)return false;
+                a=a.parentNode;}
+              var pg=__pageOfAnchor(id);if(pg<0)return false;
               __go(pg,1);return true;
             };
             // 命中测试：优先注释标记/图片，未命中返回 none（由 Kotlin 决定翻页/呼出）
@@ -320,18 +423,24 @@ class BookActivity : Activity() {
                 var tag=el.tagName;
                 if(tag==='A'){
                   var href=el.getAttribute('href')||'';
-                  // 非注释类链接：一律不弹注。有 href 交 WebView 原生导航（Kotlin 侧不翻页），
-                  // 无 href 的锚点占位视为正文（照常翻页）。
-                  if(!__isNoteRef(el))return href?'link':'none';
+                  // 非注释类链接：一律不弹注。
+                  // 0.4.27：同文档 # 锚点（EPUB2 裸注释 / 普通交叉引用）就地翻页，
+                  // 不再交 WebView 原生导航——后者可能触发 loadSpine 整章重载落回章首。
+                  // click 捕获监听器同样会处理（双保险，__goFrag 幂等）。
+                  if(!__isNoteRef(el)){
+                    if(href.charAt(0)==='#'){
+                      try{window.__goFrag(href.substring(1));}catch(e){}
+                      return 'jump';
+                    }
+                    return href?'link':'none';
+                  }
                   // 跨文件 noteref：note.xhtml#frag → 由 click 捕获监听器就地弹层并阻止原生导航；
                   // 此处只返回 'fn' 抑制翻页，不再重复转发弹注
                   if(href&&href.indexOf('#')>=0&&href.charAt(0)!=='#'&&!/^(https?:|mailto:|tel:)/i.test(href)){
                     return 'fn';
                   }
                   if(href.charAt(0)==='#'){
-                    var id=href.substring(1),t=null;
-                    try{t=document.getElementById(decodeURIComponent(id));}catch(e){}
-                    if(!t){try{t=document.getElementById(id);}catch(e){}}
+                    var t=__findAnchor(href.substring(1));
                     if(t){var b='';try{b=t.outerHTML||t.innerHTML||'';}catch(e){}
                       try{ReaderBridge.onFootnote(String(b).slice(0,80000));}catch(e){}
                       return 'fn';}
@@ -341,28 +450,46 @@ class BookActivity : Activity() {
                   if(href&&!/^(https?:|mailto:|tel:)/i.test(href))return 'fn';
                   return 'link';
                 }
-                if(tag==='IMG'){
-                  var src=el.getAttribute('src')||'';
-                  if(src){var abs=src;
-                    try{abs=new URL(src,document.baseURI).href;}catch(e){}
-                    try{ReaderBridge.onImage(String(abs));}catch(e){}
-                    return 'img';}
-                  return 'img-miss';
-                }
+                // 0.4.25：单击图片不再进查看器（改为长按 __hitTestImg）。
+                // 注释标记常写成 <a href="#fn1"><img .../></a>，必须继续向上找到 <a>
+                // 才能触发注释跳转；裸图片则一路落到 none，按区域翻页。
                 el=el.parentNode;
               }
               return 'none';
             };
-            // 注释点击：仅 epub:type="noteref" 类链接就地弹层，绝不触发 WebView 原生导航。
-            // 非注释类链接（章节交叉引用、目录锚点、外链）不拦截，交 shouldOverrideUrlLoading
-            // 正常跳章/定位。同文档 # 锚点的注释内容由 __hitTest 转发（此处只阻止导航，
-            // 避免重复弹层）；跨文件 / 无锚点 noteref 交 Kotlin 从目标文件提取后弹层。
+            /** 0.4.25：长按专用——只找图片并转发大图查看，不受外层 <a> 影响。 */
+            window.__hitTestImg=function(x,y){
+              var el=null;try{el=document.elementFromPoint(x,y);}catch(e){}
+              while(el&&el.nodeType===1){
+                if(el.tagName==='IMG'){
+                  var src=el.getAttribute('src')||'';if(!src)return 'img-miss';
+                  var abs=src;try{abs=new URL(src,document.baseURI).href;}catch(e){}
+                  try{ReaderBridge.onImage(String(abs));}catch(e){}
+                  return 'img';}
+                el=el.parentNode;}
+              return 'none';
+            };
+            // 0.4.27：同文档 # 锚点在 JS 捕获阶段就地翻页并阻止原生导航。此前非注释类
+            // 链接完全交给 WebView 原生导航 → 一旦 shouldOverrideUrlLoading 未识别为同文档
+            // （fragment 丢失 / 路径解析成别的章）就走 loadSpine 整章重载，落地为章节开头。
+            // 注释类（noteref）仍就地弹层；只有跨文件链接才放行给 shouldOverrideUrlLoading。
             document.addEventListener('click',function(e){
+              // 0.4.25：长按图片打开查看器后，抬手时 WebView 仍可能补发 click ——
+              // 抑制掉，避免同时触发图片所在 <a> 的注释跳转。
+              if(Date.now()<(window.__imgLongPressUntil||0)){e.preventDefault();e.stopPropagation();return;}
               var a=e.target;while(a&&a.nodeType===1&&a.tagName!=='A')a=a.parentNode;
               if(!a||a.nodeType!==1)return;
-              if(!__isNoteRef(a))return;
               var href=a.getAttribute('href')||'';
               if(!href||/^(https?:|mailto:|tel:)/i.test(href))return;
+              if(!__isNoteRef(a)){
+                if(href.charAt(0)==='#'){
+                  // 0.4.27：只阻止 WebView 原生导航（防止整章重载落章首 / 原生滚动乱版）。
+                  // 此处【不翻页】——翻页由 __hitTest 就地 __goFrag；若在这里先翻页，
+                  // 异步到达的 __hitTest 会用 elementFromPoint 命中已翻页的 DOM 而误判。
+                  e.preventDefault();e.stopPropagation();
+                }
+                return; // 跨文件链接交 shouldOverrideUrlLoading 正常跳章
+              }
               e.preventDefault();e.stopPropagation();
               if(href.charAt(0)==='#')return; // 同文档锚点：内容由 __hitTest 转发
               var abs='';try{abs=new URL(href,document.baseURI).href;}catch(err){abs=href;}
@@ -574,9 +701,11 @@ class BookActivity : Activity() {
                     val path = u.path ?: return true
                     val idx = spineIndexForPath(path)
                     val frag = u.fragment
-                    // 普通同文档锚点（非 noteref）：不再交 WebView 原生滚动，
-                    // 由 JS 按内容坐标把锚点换算成页码翻过去，避免横向分栏 + transform 下版面被滚乱。
-                    if (frag != null && idx == spineIndex) {
+                    // 0.4.27：同文档 # 锚点已由 INIT_JS 的 click 捕获阶段就地 __goFrag 翻页，
+                    // 正常不会走到这里；本分支仅作兜底（JS 注入失败 / 部分 ROM 仍派发导航）。
+                    // idx<0 表示路径解析失败，也先按同文档锚点尝试，避免误入 loadSpine
+                    // 整章重载后停在章节开头。
+                    if (frag != null && (idx == spineIndex || idx < 0)) {
                         val q = org.json.JSONObject.quote(frag)
                         ui.post { runJs("try{window.__goFrag($q)}catch(e){false}") }
                         return true
@@ -616,6 +745,12 @@ class BookActivity : Activity() {
                 handleTap(e.x, e.y, zone)
                 return true
             }
+
+            override fun onLongPress(e: android.view.MotionEvent) {
+                // 0.4.25：图片查看器改由长按触发；单击图片让位给 <a> 注释跳转 / 区域翻页。
+                if (scrollMode || imgOverlay != null || menuOverlay != null || fnPanel != null) return
+                handleLongPress(e.x, e.y)
+            }
         })
         webView.setOnTouchListener { _, ev ->
             gd.onTouchEvent(ev)
@@ -632,8 +767,8 @@ class BookActivity : Activity() {
             "try{window.__hitTest($cx,$cy);}catch(e){'none';}"
         ) { hit ->
             when (hit?.trim()?.removeSurrounding("'")?.removeSurrounding("\"") ?: "none") {
-                "fn", "img" -> Unit          // 弹层已由 JS→Bridge 触发
-                "link" -> Unit               // 非注释类链接：交给 WebView 原生导航（跳章/锚点），不翻页
+                "fn", "img", "jump" -> Unit  // 弹层 / 同文档锚点翻页均已由 JS 就地完成
+                "link" -> Unit               // 跨文件链接：交给 WebView 原生导航跳章，不翻页
                 "fn-miss" -> Toast.makeText(this, R.string.footnote_empty, Toast.LENGTH_SHORT).show()
                 "img-miss" -> Toast.makeText(this, R.string.image_fail, Toast.LENGTH_SHORT).show()
                 else -> when (zone) {        // none：正文按翻页处理
@@ -641,6 +776,21 @@ class BookActivity : Activity() {
                     "next" -> nextPage()
                     else -> openToc()
                 }
+            }
+        }
+    }
+
+    /** 0.4.25：长按命中图片 → 打开大图查看器；并抑制抬手后补发的 click。 */
+    private fun handleLongPress(px: Float, py: Float) {
+        val density = resources.displayMetrics.density
+        val cx = px / density
+        val cy = py / density
+        webView.evaluateJavascript(
+            "try{window.__hitTestImg($cx,$cy);}catch(e){'none';}"
+        ) { hit ->
+            when (hit?.trim()?.removeSurrounding("'")?.removeSurrounding("\"") ?: "none") {
+                "img" -> runJs("window.__imgLongPressUntil=Date.now()+900")
+                "img-miss" -> Toast.makeText(this, R.string.image_fail, Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -1565,7 +1715,7 @@ class BookActivity : Activity() {
     }
 
     /** 点击搜索结果：为命中块注入 data-srch0 + <mark> 高亮，Frag 锚点跳转。
-     *  M3.3：命中块若在渲染时被隐藏（aside 注释内 / epub:type=note 系 / id 为注释目标）：
+     *  M3.3：命中块若在渲染时被隐藏（aside 注释内 / epub:type=note 系）：
      *  1) 定位到正文中引用该注释的标记（noteref）所在块——找不到引用者则保持原页；
      *  2) 提取注释块 HTML（命中词加 mark）→ 章节渲染完成后自动弹出注释层（showFootnote）；
      *  3) 绝不展开注释进正文流——0.4.13 的展开方案会放大版面、污染页码与进度。
@@ -1591,25 +1741,9 @@ class BookActivity : Activity() {
             if (bytes == null) return@onIo
             val charset = ZipPaths.detectCharset(bytes)
             val html = String(bytes, charset)
-            // 内部锚引用目标 id（与 doLoad markedHtml 规则2 同逻辑，用于隐藏判定）
+            // 0.4.26：EPUB2 裸注释目标不再因「被内部 # 锚引用」而隐藏，故不再收集 refIds。
+            // 只有 aside / epub:type=footnote 系标准注释容器仍隐藏并走弹注。
             val selfName = item.path.substringAfterLast('/')
-            val refIds = HashSet<String>()
-            Regex("(?i)href\\s*=\\s*[\"']([^\"']*)[\"']").findAll(html).forEach { m2 ->
-                val href = m2.groupValues[1]
-                val i = href.indexOf('#')
-                if (i >= 0 && href.length > i + 1) {
-                    val file = href.substring(0, i).substringAfterLast('/')
-                    if (file.isEmpty() || file.equals(selfName, ignoreCase = true)) {
-                        val frag = href.substring(i + 1)
-                        refIds += try {
-                            java.net.URLDecoder.decode(frag, "UTF-8")
-                        } catch (ex: Exception) {
-                            Logx.w(TAG, "操作失败，按回退逻辑继续", ex)
-                            frag
-                        }
-                    }
-                }
-            }
             val fnTypes = hashSetOf("footnote", "note", "endnote", "rearnote")
             val etypeAttrRe = Regex("(?i)\\sepub:type\\s*=\\s*[\"']([^\"']*)[\"']")
             val idAttrRe = Regex("(?i)\\bid\\s*=\\s*[\"']?([^\"'\\s>/]+)")
@@ -1646,14 +1780,17 @@ class BookActivity : Activity() {
                 val types = etypeAttrRe.find(attrs)?.groupValues[1]?.trim()?.lowercase()
                     ?.split(Regex("\\s+")) ?: emptyList()
                 val ownId = idAttrRe.find(attrs)?.groupValues[1]
-                val hidden = types.any { it in fnTypes } || inAside || (ownId != null && ownId in refIds)
+                val hidden = types.any { it in fnTypes } || inAside
                 val targetId = ownId ?: asideId
                 return Pair(hidden, targetId)
             }
             fun injected(m: MatchResult, mark: Boolean, extra: String): String {
                 val inner = if (mark && re != null) ReaderFragments.markSrchText(m.groupValues[3], re) else m.groupValues[3]
+                // 0.4.24：把命中词的第一个 <mark> 标为精确锚点。块上的 data-srch0 仍保留
+                // （隐藏规则 / 兜底），但跨列块的 rect 是碎片并集，不能拿它算页码。
+                val anchored = if (mark && re != null) ReaderFragments.anchorFirstMark(inner) else inner
                 return "<" + m.groupValues[1] + m.groupValues[2] + extra + " data-srch0>" +
-                    inner + "</" + m.groupValues[1] + ">"
+                    anchored + "</" + m.groupValues[1] + ">"
             }
             var out: String? = null
             val (hidden, targetId) = hiddenAt(b.range.first, b.groupValues[2])
@@ -2078,8 +2215,8 @@ class BookActivity : Activity() {
             "sup{font-size:.75em;}" +
             "blockquote{margin:.6em 0 .6em 1em;border-left:3px solid ${p.link};padding-left:.6em;}" +
             "</style>" +
-            // 弹注内点击：图片一律进图片查看器（与正文 __hitTest 同口径），注释类链接就地刷新弹注；
-            // 普通链接不再误弹一层（弹注 WebView 本就不放行任何导航）。
+            // 0.4.25 弹注内交互：单击图片不再进查看器（改为长按），注释标记常是 <a><img/></a>，
+            // 单击须继续向上找到 <a> 才能跳转到所引注释；普通链接不再误弹一层。
             // 高度钩子：load/字体就绪/延迟重测后上报文档高度（主动定窗）
             "<script>" +
             "function __fh(){try{ReaderBridge.onFnH(String(document.documentElement.getBoundingClientRect().height))}catch(e){}}" +
@@ -2104,15 +2241,29 @@ class BookActivity : Activity() {
             "if(!v)return false;" +
             "var t=' '+String(v).toLowerCase().replace(/[^a-z0-9-]+/g,' ')+' ';" +
             "return t.indexOf(' noteref ')>=0||t.indexOf(' doc-noteref ')>=0;}" +
-            "document.addEventListener('click',function(e){" +
-            "var a=e.target;" +
-            "while(a&&a.nodeType===1&&a.tagName!=='A'&&a.tagName!=='IMG')a=a.parentNode;" +
-            "if(!a||a.nodeType!==1)return;" +
-            "if(a.tagName==='IMG'){" +
-            "var src=a.getAttribute('src')||'';if(!src)return;" +
-            "e.preventDefault();e.stopPropagation();" +
+            // 长按计时：500ms 内不移动才认定为看图，抬起/移动/取消均清除；
+            // 命中后 __lpFired 抑制随后补发的 click，避免同时跳注释。
+            "var __lpT=null,__lpFired=false,__lpX=0,__lpY=0;" +
+            "function __lpClear(){if(__lpT){clearTimeout(__lpT);__lpT=null;}}" +
+            "document.addEventListener('touchstart',function(e){" +
+            "if(e.touches.length!==1)return;__lpFired=false;" +
+            "__lpX=e.touches[0].clientX;__lpY=e.touches[0].clientY;__lpClear();" +
+            "__lpT=setTimeout(function(){__lpT=null;" +
+            "var el=document.elementFromPoint(__lpX,__lpY);" +
+            "while(el&&el.nodeType===1&&el.tagName!=='IMG')el=el.parentNode;" +
+            "if(el&&el.tagName==='IMG'){__lpFired=true;" +
+            "var src=el.getAttribute('src')||'';if(!src)return;" +
             "var iu=src;try{iu=new URL(src,document.baseURI).href}catch(x){}" +
-            "try{ReaderBridge.onImage(String(iu))}catch(x){}return;}" +
+            "try{ReaderBridge.onImage(String(iu))}catch(x){}}},500);},true);" +
+            "document.addEventListener('touchmove',function(e){if(e.touches.length===1&&" +
+            "(Math.abs(e.touches[0].clientX-__lpX)>12||Math.abs(e.touches[0].clientY-__lpY)>12))__lpClear();},true);" +
+            "document.addEventListener('touchend',function(){__lpClear();},true);" +
+            "document.addEventListener('touchcancel',function(){__lpClear();__lpFired=false;},true);" +
+            "document.addEventListener('click',function(e){" +
+            "if(__lpFired){__lpFired=false;e.preventDefault();e.stopPropagation();return;}" +
+            "var a=e.target;" +
+            "while(a&&a.nodeType===1&&a.tagName!=='A')a=a.parentNode;" +
+            "if(!a||a.nodeType!==1)return;" +
             "if(!__isNoteRef(a))return;" +
             "var href=a.getAttribute('href')||'';" +
             "if(!href)return;if(/^(mailto:|tel:)/i.test(href))return;" +

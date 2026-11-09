@@ -32,14 +32,20 @@ import java.util.concurrent.Executors
  * 书架页：最近在读网格 + 权限引导 + 按需导入入口（FR-01）。
  * 纯框架实现：GridView + BaseAdapter + Handler 线程模型。
  *
- * 0.4.22：封面加载改为「LruCache + 固定线程池 + ImageView tag 校验」。
- * 旧实现每次 getView 都 new Thread 解码、无缓存、不校验条目复用，
- * 快速滑动时既会线程泛滥，也会把 A 书的封面贴到 B 书上（错位）。
+ * 封面加载采用「LruCache + 固定线程池 + 在途任务去重 + 可见项路径标签回贴」。
+ * 0.4.28：修复导入后封面不立即刷新——旧实现把异步解码结果只贴回「发起请求的那个
+ * ImageView」，而 GridView 在 notifyDataSetChanged 后的布局里可能对同一条目多次
+ * getView（convertView 为 null 时是不同的 View 实例），且 inFlight 去重使后续实例
+ * 不会各自提交任务；一旦那个 target 已被复用（tag 变了）或已脱离视图树，标签校验
+ * 失败便永久停在占位色，直到下次滑动 / 旋转 / 切后台触发重绘才显示。现在解码完成后
+ * 遍历当前可见子项，凡此刻正显示该封面路径的格子都立即更新，并保留一次
+ * notifyDataSetChanged 兜底；同时导入返回后由 onActivityResult 主动刷新书架。
  */
 class MainActivity : Activity() {
 
     companion object {
         private const val TAG = "MainActivity"
+        private const val REQ_BROWSER = 4201
     }
 
     private val ui = Handler(Looper.getMainLooper())
@@ -48,8 +54,12 @@ class MainActivity : Activity() {
     }
     private val items = ArrayList<BookEntity>()
     private lateinit var adapter: BookAdapter
+    private lateinit var grid: GridView
     private lateinit var permCard: View
     private lateinit var emptyText: TextView
+
+    /** 导入返回时 onActivityResult 已立即刷新，跳过紧随其后的 onResume 重复查询。 */
+    private var suppressResumeReload = false
 
     /** 封面位图缓存：上限为进程最大内存的 1/8，按字节计。 */
     private val coverCache = object : LruCache<String, Bitmap>(
@@ -72,7 +82,7 @@ class MainActivity : Activity() {
         findViewById<View>(R.id.importBtn).setOnClickListener { openBrowser() }
 
         adapter = BookAdapter()
-        val grid = findViewById<GridView>(R.id.grid)
+        grid = findViewById(R.id.grid)
         grid.adapter = adapter
         grid.setOnItemClickListener { _, _, pos, _ ->
             val b = items.getOrNull(pos) ?: return@setOnItemClickListener
@@ -83,7 +93,7 @@ class MainActivity : Activity() {
         }
         // 长按删除必须挂在 GridView 的条目长按监听上：
         // 若在 item 根视图 setOnLongClickListener 会使条目变为可消费触摸，
-        // 吞掉所有点击导致 OnItemClickListener 永不触发（0.2.1 修复的关键 bug）
+        // 吞掉所有点击导致 OnItemClickListener 永不触发
         grid.setOnItemLongClickListener { _, _, pos, _ ->
             val b = items.getOrNull(pos)
             if (b != null) {
@@ -101,7 +111,13 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         permCard.visibility = if (hasStoragePermission()) View.GONE else View.VISIBLE
-        reload()
+        // 导入返回时已由 onActivityResult 立即刷新，跳过这次重复查询；
+        // 其余情况（从阅读器返回、授权返回、首次启动）照常刷新最近在读顺序。
+        if (suppressResumeReload) {
+            suppressResumeReload = false
+        } else {
+            reload()
+        }
     }
 
     private fun hasStoragePermission(): Boolean = Environment.isExternalStorageManager()
@@ -149,12 +165,25 @@ class MainActivity : Activity() {
         }
     }
 
+    @Suppress("DEPRECATION")
     private fun openBrowser() {
         if (!hasStoragePermission()) {
             requestManagePermission()
             return
         }
-        startActivity(Intent(this, FileBrowserActivity::class.java))
+        startActivityForResult(Intent(this, FileBrowserActivity::class.java), REQ_BROWSER)
+    }
+
+    @Suppress("DEPRECATION")
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        // 导入结束（新导入成功，或重复导入后返回）立即刷新书架，
+        // 不再单纯依赖 onResume 的间接时序；封面解码完成后也会即时回贴可见项。
+        if (requestCode == REQ_BROWSER && resultCode == RESULT_OK) {
+            suppressResumeReload = true
+            reload()
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -247,13 +276,13 @@ class MainActivity : Activity() {
                 cover.setImageBitmap(cached)
             } else {
                 cover.setImageDrawable(null)
-                if (path != null) loadCover(path, cover)
+                if (path != null) loadCover(path)
             }
             return v
         }
     }
 
-    private fun loadCover(path: String, target: ImageView) {
+    private fun loadCover(path: String) {
         if (!inFlight.add(path)) return
         io.execute {
             val bmp = try {
@@ -266,7 +295,22 @@ class MainActivity : Activity() {
             inFlight.remove(path)
             ui.post {
                 if (isDestroyed || bmp == null) return@post
-                if (target.getTag(R.id.cover_path_tag) == path) target.setImageBitmap(bmp)
+                // 0.4.28：不再只回贴「发起请求的 target」。GridView 布局阶段可能多次
+                // getView 并给出不同 View 实例，inFlight 去重又让后续实例不再提交任务；
+                // 只贴 target 时，一旦它被复用（tag 改变）或已脱离视图树，就永远停在
+                // 占位色。改为遍历当前可见子项：凡此刻正显示该封面路径的格子都立即更新。
+                var applied = false
+                for (i in 0 until grid.childCount) {
+                    val item = grid.getChildAt(i) ?: continue
+                    val iv = item.findViewById<ImageView>(R.id.cover) ?: continue
+                    if (iv.getTag(R.id.cover_path_tag) == path) {
+                        iv.setImageBitmap(bmp)
+                        applied = true
+                    }
+                }
+                // 兜底：解码完成时条目尚未完成布局（childCount=0）等极端时序，
+                // 触发一次 getView 以命中刚写入的缓存。
+                if (!applied) adapter.notifyDataSetChanged()
             }
         }
     }

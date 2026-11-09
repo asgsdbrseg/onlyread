@@ -38,9 +38,6 @@ object ReaderHtml {
     private val ETYPE_TAG_RE = Regex("(?i)<([a-zA-Z][a-zA-Z0-9]*)((?:\\s[^>]*)?)>")
     private val ETYPE_ATTR_RE = Regex("(?i)\\sepub:type\\s*=\\s*[\"']([^\"']*)[\"']")
     private val WS_SPLIT_RE = Regex("\\s+")
-    private val HREF_RE = Regex("""href\s*=\s*["']([^"']*)["']""", RegexOption.IGNORE_CASE)
-    private val TAG_WITH_ATTRS_RE = Regex("""<([a-zA-Z][a-zA-Z0-9]*)((?:\s[^>]*)?)>""")
-    private val ID_ATTR_RE = Regex("""\bid\s*=\s*["']?([^"'\s>/]+)""")
 
     /** 行内标签判定（抽掉标签后文字应无缝拼接，跨 <u>/<span> 的词组可命中） */
     fun isInlineTag(tag: String): Boolean = tag.lowercase() in inlineTags
@@ -103,9 +100,15 @@ object ReaderHtml {
      *
      * ⚠️ 不变量：注入的 data-srch0（搜索命中标记）必须保留，否则 JS 无法定位命中页。
      * 本函数只新增 data-fnhide，绝不删除/改写既有属性，故 data-srch0 必然保留。
+     *
+     * 0.4.26：EPUB2 裸注释（标记 <a href="#fn1"> 无 noteref，目标 <p id="fn1"> 既非
+     * <aside> 也无 epub:type="footnote"）不再隐藏。这类注释本就排在正文流里（多在章末），
+     * 隐藏后只能弹注、且跳转时解除隐藏会整章重排错位；现保持可见，点击标记直接翻页跳转。
+     * 仅标准注释容器（<aside>、epub:type=footnote|note|endnote|rearnote）才隐藏并弹注。
+     * itemPath 参数保留以兼容既有调用点，当前不再参与判定。
      */
     fun markChapterForReader(html: String, itemPath: String): String {
-        var h = html.replace(ASIDE_OPEN_RE, "<aside data-fnhide$1>")
+        val h = html.replace(ASIDE_OPEN_RE, "<aside data-fnhide$1>")
         // epub:type 精确值匹配（按空格 split 判断）——防止 "noteref" 含 "note" 子串被误隐藏
         val fnTypes = hashSetOf("footnote", "note", "endnote", "rearnote")
         val sb2 = StringBuilder()
@@ -121,51 +124,9 @@ object ReaderHtml {
             last2 = m.range.last + 1
         }
         sb2.append(h.substring(last2))
-        h = sb2.toString()
-        val selfName = itemPath.substringAfterLast('/')
-        val refIds = HashSet<String>()
-        HREF_RE.findAll(html).forEach { m ->
-            val href = m.groupValues[1]
-            val i = href.indexOf('#')
-            if (i >= 0 && href.length > i + 1) {
-                val file = href.substring(0, i).substringAfterLast('/')
-                if (file.isEmpty() || file.equals(selfName, ignoreCase = true)) {
-                    refIds += try {
-                        java.net.URLDecoder.decode(href.substring(i + 1), "UTF-8")
-                    } catch (_: IllegalArgumentException) {
-                        // 非法 % 转义：按原始片段作为锚 id，保持与浏览器一致
-                        href.substring(i + 1)
-                    }
-                }
-            }
-        }
-        if (refIds.isNotEmpty()) {
-            // 只标记块级目标——回链指向的正文引用锚（行内 <a id="refN">）不隐藏；
-            // body/head 绝不标记（防止整页消失）
-            val blockTags = hashSetOf(
-                "p", "div", "li", "ul", "ol", "blockquote", "dd", "dt", "dl", "td", "th", "tr",
-                "section", "article", "table", "figure", "figcaption", "main", "pre",
-                "header", "footer", "address", "details", "summary", "fieldset", "form", "caption"
-            )
-            val sb = StringBuilder()
-            var last = 0
-            for (m in TAG_WITH_ATTRS_RE.findAll(h)) {
-                val tag = m.groupValues[1].lowercase()
-                if (tag == "body" || tag == "html" || tag == "head") continue
-                if (tag !in blockTags) continue // 行内锚（引用标记）保持可见
-                val attrs = m.groupValues[2]
-                if (attrs.contains("data-fnhide")) continue
-                val idv = ID_ATTR_RE.find(attrs)?.groupValues?.get(1)
-                if (idv != null && idv in refIds) {
-                    sb.append(h, last, m.range.first)
-                    sb.append('<').append(m.groupValues[1]).append(" data-fnhide").append(attrs).append('>')
-                    last = m.range.last + 1
-                }
-            }
-            sb.append(h.substring(last))
-            h = sb.toString()
-        }
-        return h
+        // 0.4.26：不再按「内部 # 锚引用的 id」把块级目标标 data-fnhide。
+        // 只有上面的 <aside> / epub:type=footnote 系标准注释容器才隐藏并弹注。
+        return sb2.toString()
     }
 
     /**

@@ -104,4 +104,37 @@ class ReaderFragmentsTest {
     fun currentTocIndex_emptyTocReturnsMinusOne() {
         assertEquals(-1, ReaderFragments.currentTocIndex(emptyList(), 3, "h1", 0))
     }
+
+    // ——— 0.4.24：搜索命中精确锚点 ———
+
+    @Test
+    fun anchorFirstMark_marksOnlyTheFirstHit() {
+        val html = "甲<mark class=\"__srch\">春</mark>乙<mark class=\"__srch\">秋</mark>"
+        val out = ReaderFragments.anchorFirstMark(html)
+        assertEquals(
+            "甲<mark class=\"__srch\" data-srch-hit>春</mark>乙<mark class=\"__srch\">秋</mark>",
+            out
+        )
+        assertEquals(1, Regex("data-srch-hit").findAll(out).count())
+    }
+
+    @Test
+    fun anchorFirstMark_noMarkKeepsHtmlIntact() {
+        val html = "<p>没有命中词的正文</p>"
+        assertEquals(html, ReaderFragments.anchorFirstMark(html))
+    }
+
+    @Test
+    fun anchorFirstMark_alreadyAnchoredIsIdempotent() {
+        val html = "<mark class=\"__srch\" data-srch-hit>春</mark>"
+        assertEquals(html, ReaderFragments.anchorFirstMark(html))
+    }
+
+    @Test
+    fun anchorFirstMark_worksOnOutputOfMarkSrchText() {
+        val marked = ReaderFragments.markSrchText("<p>春秋春秋</p>", Regex("春"))
+        val out = ReaderFragments.anchorFirstMark(marked)
+        assertTrue(out.contains("<mark class=\"__srch\" data-srch-hit>春</mark>"))
+        assertEquals(2, Regex("<mark").findAll(out).count())
+    }
 }

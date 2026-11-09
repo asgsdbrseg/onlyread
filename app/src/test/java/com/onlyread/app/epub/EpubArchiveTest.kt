@@ -51,7 +51,82 @@ class EpubArchiveTest {
         assertFalse("NAV 仍应被剔除", ids.contains("nav"))
     }
 
+    /** 0.4.25：EPUB2 NCX 父 navPoint 必须先于子 navPoint 输出（旧后序解析把父排到子后）。 */
+    private fun buildEpubWithNcx(ncx: String): File {
+        val f = File.createTempFile("onlyread-ncx-", ".epub")
+        f.deleteOnExit()
+        ZipOutputStream(f.outputStream()).use { zos ->
+            zos.putNextEntry(ZipEntry("META-INF/container.xml"))
+            zos.write(CONTAINER.toByteArray(Charsets.UTF_8))
+            zos.closeEntry()
+            zos.putNextEntry(ZipEntry("OEBPS/content.opf"))
+            zos.write(OPF_WITH_NCX.toByteArray(Charsets.UTF_8))
+            zos.closeEntry()
+            zos.putNextEntry(ZipEntry("OEBPS/toc.ncx"))
+            zos.write(ncx.toByteArray(Charsets.UTF_8))
+            zos.closeEntry()
+        }
+        return f
+    }
+
+    @Test
+    fun parseBook_ncxParentComesBeforeChildren() {
+        val book = EpubArchive(buildEpubWithNcx(NCX_NESTED)).use { it.parseBook() }!!
+        assertEquals(
+            "父 navPoint 必须排在它的子 navPoint 之前",
+            listOf("出版说明", "前言", "第一编 绪论", "第一章 甲", "第二章 乙", "第二编 基本情况"),
+            book.toc.map { it.title }
+        )
+        assertEquals(
+            listOf(0, 0, 0, 1, 1, 0),
+            book.toc.map { it.level }
+        )
+        assertEquals(
+            listOf(null, null, null, "c1", "c2", null),
+            book.toc.map { it.frag }
+        )
+        assertTrue("所有条目都应映射到 spine", book.toc.all { it.spineIndex >= 0 })
+    }
+
+    @Test
+    fun parseBook_ncxThreeLevelsKeepOrderAndDepth() {
+        val ncx = """<?xml version="1.0"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/"><navMap>
+<navPoint id="a"><navLabel><text>A</text></navLabel><content src="Text/chap.xhtml"/>
+  <navPoint id="b"><navLabel><text>B</text></navLabel><content src="Text/chap.xhtml#b"/>
+    <navPoint id="c"><navLabel><text>C</text></navLabel><content src="Text/chap.xhtml#c"/></navPoint>
+  </navPoint>
+</navPoint>
+<navPoint id="d"><navLabel><text>D</text></navLabel><content src="Text/chap.xhtml"/>
+</navPoint></navMap></ncx>"""
+        val book = EpubArchive(buildEpubWithNcx(ncx)).use { it.parseBook() }!!
+        assertEquals(listOf("A", "B", "C", "D"), book.toc.map { it.title })
+        assertEquals(listOf(0, 1, 2, 0), book.toc.map { it.level })
+    }
+
     companion object {
+        private const val OPF_WITH_NCX = """<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <manifest>
+    <item id="chap1" href="Text/chap.xhtml" media-type="application/xhtml+xml"/>
+    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
+  </manifest>
+  <spine toc="ncx"><itemref idref="chap1"/></spine>
+</package>"""
+
+        private const val NCX_NESTED = """<?xml version="1.0"?>
+<ncx version="2005-1" xmlns="http://www.daisy.org/z3986/2005/ncx/">
+<navMap>
+  <navPoint id="n1" playOrder="1"><navLabel><text>出版说明</text></navLabel><content src="Text/chap.xhtml"/></navPoint>
+  <navPoint id="n2" playOrder="2"><navLabel><text>前言</text></navLabel><content src="Text/chap.xhtml"/></navPoint>
+  <navPoint id="n3" playOrder="3"><navLabel><text>第一编 绪论</text></navLabel><content src="Text/chap.xhtml"/>
+    <navPoint id="n4" playOrder="4"><navLabel><text>第一章 甲</text></navLabel><content src="Text/chap.xhtml#c1"/></navPoint>
+    <navPoint id="n5" playOrder="5"><navLabel><text>第二章 乙</text></navLabel><content src="Text/chap.xhtml#c2"/></navPoint>
+  </navPoint>
+  <navPoint id="n6" playOrder="6"><navLabel><text>第二编 基本情况</text></navLabel><content src="Text/chap.xhtml"/></navPoint>
+</navMap>
+</ncx>"""
+
         private const val CONTAINER = """<?xml version="1.0"?>
 <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
   <rootfiles>

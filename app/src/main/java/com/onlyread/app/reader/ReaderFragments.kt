@@ -32,6 +32,20 @@ object ReaderFragments {
             else re.replace(t) { mm -> "<mark class=\"__srch\">${mm.value}</mark>" }
         }
 
+    private const val SRCH_MARK = "<mark class=\"__srch\">"
+    private const val SRCH_MARK_HIT = "<mark class=\"__srch\" data-srch-hit>"
+
+    /**
+     * 0.4.24：把首个命中 `<mark>` 标成精确锚点，供 INIT_JS 的 `__pageOfHit()` 定位。
+     *
+     * 搜索注入此前把 `data-srch0` 加在整块标签上，再用 `getBoundingClientRect()` 换算页码。
+     * CSS 多列下跨列块是 fragmented element，该 API 返回所有列碎片的**并集**，`left` 恒取
+     * 最左碎片（块起始列）——命中词在块中部时落地页大幅提前，且字体就绪后的 `__reanchor`
+     * 用同一锚反复把页面拉回块起始列。长章节（>50 页）里不分段长块跨列多，偏移最明显。
+     * 改为按命中词内联 mark 的首个 `getClientRects()` 定位，才是命中词真实所在列。
+     */
+    fun anchorFirstMark(inner: String): String = inner.replaceFirst(SRCH_MARK, SRCH_MARK_HIT)
+
     /** 无锚点的跨文件链接：取目标文件正文作为弹注内容（仍不跳章） */
     fun extractBodyHtml(html: String): String =
         BODY_RE.find(html)?.groupValues?.get(1)?.replace(SCRIPT_RE, "") ?: html

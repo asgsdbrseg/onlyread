@@ -8,7 +8,8 @@ import org.junit.Test
  *
  * 覆盖三类与本次修复直接相关的逻辑：
  *  1) 可见文本抽取 / 命中片段 —— 全文搜索结果的正确性与展示；
- *  2) 章节注释块标记 —— 必须隐藏脚注、保留 data-srch0（搜索跳转定位的前提）；
+ *  2) 章节注释块标记 —— 只隐藏标准注释容器（aside / epub:type=footnote 系）、
+ *     保留 EPUB2 裸注释可见、保留 data-srch0（搜索跳转定位的前提）；
  *  3) 页码换算公式 —— 与 JS 侧同公式，验证“搜索跳转页码偏移”修复的几何正确性。
  */
 class ReaderHtmlTest {
@@ -90,11 +91,26 @@ class ReaderHtmlTest {
     }
 
     @Test
-    fun markChapter_hidesBlockReferencedById() {
-        val html = "<html><body><a href=\"#ref1\">1</a><p id=\"ref1\">被引用的回链目标</p></body></html>"
+    fun markChapter_keepsPlainEpub2NoteVisible() {
+        // 0.4.26：EPUB2 裸注释（标记无 noteref、目标无 epub:type / 非 aside）保持可见，
+        // 点击标记由 __goFrag 直接翻页跳转，不再隐藏后弹注。
+        val html = "<html><body><a href=\"#fn1\">1</a><p id=\"fn1\">注释内容</p></body></html>"
         val marked = ReaderHtml.markChapterForReader(html, "chap1.xhtml")
-        assertTrue("被内部锚引用的块应被标记隐藏", marked.contains("data-fnhide"))
-        assertTrue(marked.contains("id=\"ref1\""))
+        assertFalse("EPUB2 裸注释目标不得被隐藏", marked.contains("data-fnhide"))
+        assertTrue("目标 id 必须保留以便直接跳转定位", marked.contains("id=\"fn1\""))
+    }
+
+    @Test
+    fun markChapter_stillHidesStandardFootnoteContainers() {
+        // 标准注释容器（aside / epub:type=footnote 系）仍隐藏并弹注，不受 0.4.26 影响
+        val html = "<html><body><p>正文</p>" +
+            "<aside id=\"fn2\"><p>注A</p></aside>" +
+            "<div epub:type=\"footnote\" id=\"fn3\">注B</div></body></html>"
+        val marked = ReaderHtml.markChapterForReader(html, "chap1.xhtml")
+        assertEquals(
+            "aside 与 epub:type=footnote 容器应各带一个 data-fnhide",
+            2, Regex("data-fnhide").findAll(marked).count()
+        )
     }
 
     @Test
