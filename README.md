@@ -15,7 +15,7 @@
 | ------- | --------------------------------------------------------------------- |
 | 数据层     | 框架 `SQLiteOpenHelper`（`data/BooksDb.kt`，books 表结构与《设计文档 v1.1》§5 完全一致） |
 | UI      | 框架 `Activity` + `GridView`/`ListView` + `AlertDialog`                 |
-| 线程模型    | `Thread` + `Handler(Looper.getMainLooper())`                          |
+| 线程模型    | 固定线程池 `ExecutorService` + `Handler(Looper.getMainLooper())`（0.4.22 起，可取消） |
 | EPUB 解析 | `ZipFile` + `XmlPullParser`（无 Jsoup 等三方库）                             |
 | 阅读内核    | WebView + 虚拟资源通道（zip 直读回流，不落盘解包）                                      |
 
@@ -103,7 +103,8 @@ Release 自动出现 `onlyread-0.1.0-m0.apk`。以后发版 = 打 tag。
   书籍自带 `<head>` 给 `html/body` 设的 `border-radius`。现改为纯色直角背景，并在弹注 CSS  
   里显式压制 `html/body` 的圆角与阴影，两条来源一起去掉。选区菜单仍保留圆角。
 - **目录窗口尺寸对齐全文搜索窗口**：`MATCH_PARENT` 宽 × 80% 屏高（原为 72% + 主题默认宽度）；  
-  顶部居中，输入法弹起时仍会压缩高度以保证过滤框可见。
+  顶部居中，输入法弹起时仍会压缩高度以保证过滤框可见。  
+  ⚠️ **0.4.23 起已被统一浮层取代**：三个菜单统一为 80vw × 80vh 居中、跟随主题，见下文。
 - **全文搜索栏**：第一行保留输入框 + 「搜索」；「范围」按钮移到第二行，其后新增  
   **「异体字」开关按钮**（默认「开」，状态持久化）。切换开关时若已有查询会立即重新搜索。
 - **选区菜单默认置于选区上方**（M3.8）：菜单放在下方会挡住向下拖动选区时的文字与拖动手柄。  
@@ -216,6 +217,101 @@ Release 自动出现 `onlyread-0.1.0-m0.apk`。以后发版 = 打 tag。
   ROM 是否提供衬线中文字体；若要跨设备保证中文衬线，需由 App 内置字体并通过
   `@font-face` 注入。
 
+### 0.4.22 修正（代码审查问题全量收口 + 输入法问题根治）
+
+**P0（正确性）**
+
+- **DB 版本号 3 → 4**：此前 `SQLiteOpenHelper` 版本停在 3，`onUpgrade` 里
+  `if (oldVersion < 4) ALTER TABLE toc ADD COLUMN frag` 分支永不触发；v3 老库升级后
+  查询 `frag` 会抛异常并被静默吞掉，目录「同文件多标题」跳转失效。现版本升到 4，
+  迁移前用 `PRAGMA table_info` 判断列是否已存在，既不再吞异常，也兼容 v2 建表时已带
+  `frag` 的库；`SELECT *` 全部改为显式列清单，游标按 `getColumnIndexOrThrow` 取列名，
+  杜绝表结构演进后的列序错位。
+- **生命周期清理**：`onDestroy()` 现在会 `destroy` 主 WebView（停加载 → 摘 JS 桥 →
+  about:blank → 脱离视图树）、`ui.removeCallbacksAndMessages(null)` 清掉所有延迟回调、
+  `shutdownNow` 统一后台线程池、清空缓存与在途任务后再关闭 `EpubArchive`。所有后台
+  任务与 JS 桥回调检查 `destroyed` 标志，避免操作已销毁对象。`EpubArchive` 内部给
+  ZipFile 的读取与关闭加同一把锁和 `closed` 标志，解决「关归档时拦截线程仍在读」
+  的并发关闭崩溃。
+
+**P1（性能）**
+
+- **正则预编译**：`ReaderHtml.extractVisibleText` 每调用一次新建 3 个 Regex（全书搜索
+  对上万块元素调用）、`markChapterForReader` 每次新建 7 个，现全部提升为预编译常量。
+- **书架封面**：改为 `LruCache`（上限 1/8 最大内存）+ 固定 2 线程池 + 在途任务去重；
+  `ImageView` 绑定 `R.id.cover_path_tag` 路径标签，异步解码回来先校验再贴，消除
+  GridView 复用导致的封面错位与快速滑动时的线程泛滥。
+- **资源拦截不再整块读内存**：`EpubArchive` 新增 `entryStream()`，图片/字体等二进制
+  资源经 `WebResourceResponse` 直接流式交给 WebView；小文本资源走带 4MB 上限的
+  LRU 字节缓存，同一 CSS 不被反复解压；外链 CSS 的字体前置改写结果按
+  「路径 + 前置栈」缓存。
+
+**P2（代码质量）**
+
+- 全项目 `catch (_: Exception) {}` 静默吞异常改为带日志的明确回退（新增
+  `util/Logx.kt`，Android 走 logcat、JVM 单测回退 stderr）。
+- `EpubArchive` 所有 XML 解析输入流明确关闭（或改用 `ByteArrayInputStream` + `use`）。
+- `pendingSrchHtml` 改 `ConcurrentHashMap`，`archive` / `epub` / `toc` / `bookFonts` /
+  `pendingFnHtml` / `searchCancelled` / `searchSession` 加 `@Volatile`，消除跨线程可见性隐患。
+- 消除全部 `!!`；`BookActivity` 的无状态 HTML/CSS 工具抽出为
+  `reader/ReaderFragments.kt`（渐进拆分 God Class，正则预编译、可 JVM 单测）。
+- `MainActivity` / `FileBrowserActivity` 移除 `configChanges` 交给系统重建；
+  `BookActivity` 保留（分页几何/锚点需跨旋屏保留，且必须拦截 `keyboardHidden`，
+  否则输入法弹出会重建 Activity 令搜索浮层消失）。
+
+**全文搜索窗口呼出输入法不上移（0.4.21 失效的根治）**
+
+0.4.21 用 `AlertDialog` + `SOFT_INPUT_ADJUST_NOTHING`，在部分 ROM 上仍被上推：
+Dialog 是 `TYPE_APPLICATION_PANEL` 子窗口，系统会为保证输入框可见而平移它，
+忽略 `ADJUST_NOTHING`。现改为挂在 Activity `decorView` 上的普通浮层，主窗口已声明
+`windowSoftInputMode="adjustNothing"`，浮层坐标由代码写死（`Gravity.TOP` + 固定 y、
+80% 屏高），IME 弹出时窗口与面板都不发生位移；返回键优先关闭该浮层，点外部关闭，
+关闭时打断扫描并收起输入法。（0.4.23 起三个菜单统一改为 `Gravity.CENTER` 居中、80vw 宽。）
+
+- **版本**：`versionCode 38` / `versionName 0.4.22`（与 0.4.21 同密钥，可覆盖安装）。
+
+### 0.4.23 优化（三大菜单统一 + 同文件多标题目录定位）
+
+**① 目录 / 阅读设置 / 全文搜索界面统一**
+
+三个界面此前形态各异：目录与阅读设置用系统 `AlertDialog`（`dialogTheme()` 只分亮/暗，
+纸色主题跟随不到），全文搜索是 decorView 浮层但宽 100vw；文字色一律取固定的
+`R.color.text_main`，而 Activity 主题恒为 Light，夜间主题下系统输入框/按钮仍是白底黑字。
+0.4.23 抽出 `showMenuOverlay()` 统一托管：
+
+| 项 | 0.4.23 统一行为 |
+|---|---|
+| 容器 | Activity `decorView` 浮层（与 0.4.22 搜索一致），任意时刻只存在一个 |
+| 尺寸 | **宽 80vw × 高 80vh，`Gravity.CENTER` 水平垂直居中** |
+| 主题 | 背景 `pal().bg`、文字 `pal().text`、强调 `pal().link`，分隔线/描边由文字色派生 alpha |
+| 控件 | 输入框、按钮、ListView 分割线、SeekBar 进度/滑块全部跟随主题，不再用系统默认色 |
+| 输入法 | 窗口已声明 `adjustNothing`，浮层坐标写死 → **呼出 IME 仍不上移**；过滤/搜索输入框移到面板顶部，避免被底部键盘遮挡 |
+| 关闭 | 点遮罩 / 返回键 / 「取消」统一关闭；搜索浮层关闭时打断扫描并收起输入法 |
+
+阅读设置项较多，内容套 `ScrollView` 保证小屏可完整操作；目录与搜索列表改用权重填满
+内容区，不再写死 430dp。三个界面都改为普通 View 后不再依赖 `AlertDialog`，
+`dialogTheme()` 随之移除。
+
+**② 一个 html 内含多个标题时目录定位错误**
+
+旧实现把「当前章节」无条件取为 `spineIndex` 匹配的**最后一条**目录行（注释写「取最深」
+但代码没判断），导致同一文件有多个小节标题时，无论读到哪一节，打开目录都只高亮/
+滚动到最后一个标题；此外 `__reanchor` 的 frag 分支优先查 `[data-srch0]`，会把目录锚点
+重定位拽回上一次搜索命中处。修复：
+
+- `ReaderFragments.currentTocIndex()`（纯函数，已补 7 个单测）按优先级选当前项：
+  **① 当前页锚点 frag 精确命中 → ② 最近一次目录跳转的 ord → ③ 该章第一条 → ④ -1**，
+  不再取最后一条。当前页属于哪个标题由 INIT_JS 的 `__report()` 回报：把本章目录锚点
+  `window.__tocFrags` 注入页面，从页首可见元素向前找最近的目录 id 一并回报给
+  `ReaderBridge.onLayout()`。
+- `__reanchor` 的 frag 分支改为**先 `getElementById(a.frag)`**，只有搜索专用锚 `srch0`
+  才回退 `[data-srch0]`，目录/交叉引用跳转不再被搜索残留干扰。
+- 新增 `Anchor.TocText`：NCX/NAV 未给 `#frag` 但同一 html 有多个标题时（旧行为是所有
+  条目都跳章首），按标题文本在正文里找首个匹配块并翻到其所在页；找不到仍回退章首。
+  页码计算统一收敛到 JS 辅助函数 `__pageOfNode()`。
+
+- **版本**：`versionCode 39` / `versionName 0.4.23`（与 0.4.22 同密钥，可覆盖安装）。
+
 ## 异体字搜索（可编辑的 variants.json）
 
 开启「异体字」时，输入 `黄钟` 会按表展开为 `[黄黃][钟锺𲈛鍾鐘]` 再作为正则扫描，  
@@ -272,12 +368,14 @@ onlyread/
 │  ├─ reader/BookActivity.kt        阅读页（虚拟资源通道）
 │  ├─ reader/Variants.kt · VariantsStore.kt  异体字表解析/展开 + 启动时读盘与内存缓存
 │  ├─ reader/ReaderHtml.kt · ReaderPrefs.kt  HTML 纯函数 / 阅读偏好
-│  ├─ epub/EpubArchive.kt · EpubBook.kt   zip/OPF 解析
+│  ├─ reader/ReaderFragments.kt     弹注 HTML/CSS 无状态工具 + 目录当前项定位（0.4.22/23 抽出）
+│  ├─ epub/EpubArchive.kt · EpubBook.kt   zip/OPF 解析（流式 + LRU，并发安全）
 │  ├─ data/BookImporter.kt          导入单一入口（严格直引原文件，不复制）
-│  ├─ data/BooksDb.kt               SQLite 书库表
+│  ├─ data/BooksDb.kt               SQLite 书库表（v4，显式列）
 │  ├─ util/EpubNames.kt             EPUB 名字/MIME 识别（纯 JVM）
+│  ├─ util/Logx.kt                  轻量日志（Android logcat / JVM stderr）
 │  └─ util/ZipPaths.kt · Hashing.kt · UriPath.kt 路径/编码/Uri、身份指纹
-└─ app/src/main/res/                中文文案 / 布局 / 自适应图标
+└─ app/src/main/res/values/ids.xml   封面 ImageView 防错位 tag key
 ```
 
 ## 里程碑

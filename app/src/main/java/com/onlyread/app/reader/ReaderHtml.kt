@@ -6,6 +6,10 @@ package com.onlyread.app.reader
  * 全文搜索扫描、可见文本抽取、注释块标记、页码换算集中于此。
  * BookActivity 只负责线程编排与 WebView 渲染——繁重的字符串/正则变换
  * 通过 [markChapterForReader] 在后台线程执行，避免大书打开与搜索跳转时主线程冻结。
+ *
+ * 0.4.22：所有正则提升为预编译常量。此前 [extractVisibleText] 每调用一次就
+ * 新建 3 个 Regex（全书搜索会对每个块元素调用上万次），[markChapterForReader]
+ * 每次也重新编译 7 个，Pattern.compile 的开销与 GC 压力都相当可观。
  */
 object ReaderHtml {
 
@@ -26,6 +30,18 @@ object ReaderHtml {
     private val entNameRe = Regex("&[a-zA-Z][a-zA-Z0-9]*;")
     private val entNumRe = Regex("&#(x?)([0-9a-fA-F]+);")
 
+    // ————— 预编译正则（0.4.22：不再在热路径里 Pattern.compile）—————
+    private val SCRIPT_STYLE_RE = Regex("(?is)<(script|style)[\\s\\S]*?</\\1>")
+    private val ANY_TAG_RE = Regex("(?is)</?([a-zA-Z][a-zA-Z0-9]*)[^>]*>")
+    private val WS_COLLAPSE_RE = Regex("[ \t\n\u000B\u000C\r\u00A0]+")
+    private val ASIDE_OPEN_RE = Regex("(?i)<aside([^>]*)>")
+    private val ETYPE_TAG_RE = Regex("(?i)<([a-zA-Z][a-zA-Z0-9]*)((?:\\s[^>]*)?)>")
+    private val ETYPE_ATTR_RE = Regex("(?i)\\sepub:type\\s*=\\s*[\"']([^\"']*)[\"']")
+    private val WS_SPLIT_RE = Regex("\\s+")
+    private val HREF_RE = Regex("""href\s*=\s*["']([^"']*)["']""", RegexOption.IGNORE_CASE)
+    private val TAG_WITH_ATTRS_RE = Regex("""<([a-zA-Z][a-zA-Z0-9]*)((?:\s[^>]*)?)>""")
+    private val ID_ATTR_RE = Regex("""\bid\s*=\s*["']?([^"'\s>/]+)""")
+
     /** 行内标签判定（抽掉标签后文字应无缝拼接，跨 <u>/<span> 的词组可命中） */
     fun isInlineTag(tag: String): Boolean = tag.lowercase() in inlineTags
 
@@ -38,8 +54,8 @@ object ReaderHtml {
         // 纯文本块（无标签无实体，大量正文短块）直接返回，跳过 5 趟正则
         if ('<' !in inner && '&' !in inner) return inner
         val stripped = inner
-            .replace(Regex("(?is)<(script|style)[\\s\\S]*?</\\1>"), " ")
-            .replace(Regex("(?is)</?([a-zA-Z][a-zA-Z0-9]*)[^>]*>")) { m ->
+            .replace(SCRIPT_STYLE_RE, " ")
+            .replace(ANY_TAG_RE) { m ->
                 if (m.groupValues[1].lowercase() in inlineTags) "" else "\n"
             }
             .replace(entNameRe) { m ->
@@ -54,15 +70,17 @@ object ReaderHtml {
                 }
             }
             .replace(entNumRe) { m ->
+                // 畸形数字实体（超 Int 范围 / 非十六进制）按空格处理，属预期回退，
+                // 不是静默吞异常：搜索扫描里这类脏数据很常见，打日志只会刷屏。
                 val code = try {
                     if (m.groupValues[1] == "x") m.groupValues[2].toInt(16) else m.groupValues[2].toInt()
-                } catch (_: Exception) {
+                } catch (_: NumberFormatException) {
                     return@replace " "
                 }
                 if (code in 0x20..0xFFFF && !Character.isISOControl(code)) code.toChar().toString() else " "
             }
         // 仅塌缩空格类空白（含 NBSP），保留 \n 作为块边界
-        return stripped.replace(Regex("[ \t\n\u000B\u000C\r\u00A0]+"), " ").trim()
+        return stripped.replace(WS_COLLAPSE_RE, " ").trim()
     }
 
     /**
@@ -87,17 +105,15 @@ object ReaderHtml {
      * 本函数只新增 data-fnhide，绝不删除/改写既有属性，故 data-srch0 必然保留。
      */
     fun markChapterForReader(html: String, itemPath: String): String {
-        var h = html.replace(Regex("(?i)<aside([^>]*)>"), "<aside data-fnhide$1>")
+        var h = html.replace(ASIDE_OPEN_RE, "<aside data-fnhide$1>")
         // epub:type 精确值匹配（按空格 split 判断）——防止 "noteref" 含 "note" 子串被误隐藏
         val fnTypes = hashSetOf("footnote", "note", "endnote", "rearnote")
-        val etypeRe = Regex("(?i)<([a-zA-Z][a-zA-Z0-9]*)((?:\\s[^>]*)?)>")
-        val etypeAttrRe = Regex("(?i)\\sepub:type\\s*=\\s*[\"']([^\"']*)[\"']")
         val sb2 = StringBuilder()
         var last2 = 0
-        for (m in etypeRe.findAll(h)) {
+        for (m in ETYPE_TAG_RE.findAll(h)) {
             val attrs = m.groupValues[2]
-            val em = etypeAttrRe.find(attrs) ?: continue
-            val types = em.groupValues[1].trim().lowercase().split(Regex("\\s+"))
+            val em = ETYPE_ATTR_RE.find(attrs) ?: continue
+            val types = em.groupValues[1].trim().lowercase().split(WS_SPLIT_RE)
             if (types.none { it in fnTypes }) continue // noteref / other → 不隐藏
             if (attrs.contains("data-fnhide")) continue
             sb2.append(h, last2, m.range.first)
@@ -108,7 +124,7 @@ object ReaderHtml {
         h = sb2.toString()
         val selfName = itemPath.substringAfterLast('/')
         val refIds = HashSet<String>()
-        Regex("""href\s*=\s*["']([^"']*)["']""", RegexOption.IGNORE_CASE).findAll(html).forEach { m ->
+        HREF_RE.findAll(html).forEach { m ->
             val href = m.groupValues[1]
             val i = href.indexOf('#')
             if (i >= 0 && href.length > i + 1) {
@@ -116,7 +132,8 @@ object ReaderHtml {
                 if (file.isEmpty() || file.equals(selfName, ignoreCase = true)) {
                     refIds += try {
                         java.net.URLDecoder.decode(href.substring(i + 1), "UTF-8")
-                    } catch (_: Exception) {
+                    } catch (_: IllegalArgumentException) {
+                        // 非法 % 转义：按原始片段作为锚 id，保持与浏览器一致
                         href.substring(i + 1)
                     }
                 }
@@ -130,17 +147,15 @@ object ReaderHtml {
                 "section", "article", "table", "figure", "figcaption", "main", "pre",
                 "header", "footer", "address", "details", "summary", "fieldset", "form", "caption"
             )
-            val tagRe = Regex("""<([a-zA-Z][a-zA-Z0-9]*)((?:\s[^>]*)?)>""")
-            val idRe = Regex("""\bid\s*=\s*["']?([^"'\s>/]+)""")
             val sb = StringBuilder()
             var last = 0
-            for (m in tagRe.findAll(h)) {
+            for (m in TAG_WITH_ATTRS_RE.findAll(h)) {
                 val tag = m.groupValues[1].lowercase()
                 if (tag == "body" || tag == "html" || tag == "head") continue
                 if (tag !in blockTags) continue // 行内锚（引用标记）保持可见
                 val attrs = m.groupValues[2]
                 if (attrs.contains("data-fnhide")) continue
-                val idv = idRe.find(attrs)?.groupValues?.get(1)
+                val idv = ID_ATTR_RE.find(attrs)?.groupValues?.get(1)
                 if (idv != null && idv in refIds) {
                     sb.append(h, last, m.range.first)
                     sb.append('<').append(m.groupValues[1]).append(" data-fnhide").append(attrs).append('>')

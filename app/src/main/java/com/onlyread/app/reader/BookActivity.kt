@@ -2,7 +2,6 @@ package com.onlyread.app.reader
 
 import android.annotation.SuppressLint
 import android.app.Activity
-import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
 import android.content.res.Configuration
@@ -45,8 +44,12 @@ import com.onlyread.app.data.ProgressRow
 import com.onlyread.app.data.TocRow
 import com.onlyread.app.epub.EpubArchive
 import com.onlyread.app.epub.EpubBook
+import com.onlyread.app.util.Logx
 import com.onlyread.app.util.UriPath
 import com.onlyread.app.util.ZipPaths
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.util.Locale
@@ -63,6 +66,7 @@ import java.util.Locale
 class BookActivity : Activity() {
 
     companion object {
+        private const val TAG = "BookActivity"
         const val EXTRA_BOOK_ID = "book_id"
         private const val KEY_SPINE = "spine_index"
         private const val KEY_PAGE = "page_index"
@@ -147,7 +151,41 @@ class BookActivity : Activity() {
               for(var i=0;i<els.length;i++){var r=els[i].getBoundingClientRect();
               if(r.width<=0||r.height<=0)continue;
               if(r.left>=-2&&r.left<lim)return i;}return -1;}
-            function __report(){try{ReaderBridge.onLayout(__r.page,__r.total,__anchorOrd());}catch(e){}}
+            // 0.4.23：回报当前页所属目录标题锚点（从页首元素向前找最近的目录 id），
+            // 使同文件多标题时目录当前项跟随阅读位置，而不是固定取最后一条。
+            function __report(){try{var o=__anchorOrd(),tf='';
+              var fs=window.__tocFrags||[];
+              if(fs.length&&o>=0){
+                var mp={};for(var k=0;k<fs.length;k++){if(fs[k])mp[fs[k]]=1;}
+                var es=__els();
+                for(var i=o;i>=0;i--){var n=es[i],hit=false;
+                  while(n&&n.nodeType===1){var v=n.getAttribute&&n.getAttribute('id');
+                    if(v&&mp[v]){tf=v;hit=true;break;}n=n.parentNode;}
+                  if(hit)break;}}
+              ReaderBridge.onLayout(__r.page,__r.total,o,tf);}catch(e){}}
+            /** 元素所在页（内容坐标）；被 data-fnhide 隐藏时现场解除后重测。 */
+            function __pageOfNode(fe){if(!fe)return -1;
+              var r=fe.getBoundingClientRect();
+              if(r.width<=0&&r.height<=0){var anc=fe;
+                while(anc&&anc.nodeType===1){
+                  if(anc.getAttribute&&anc.getAttribute('data-fnhide')!==null){
+                    anc.removeAttribute('data-fnhide');__meas();
+                    r=fe.getBoundingClientRect();break;}
+                  anc=anc.parentNode;}}
+              var x=r.left+__r.page*__r.W;
+              var pg=Math.floor((x-__r.M)/__r.W);
+              if(!(pg>=0))pg=0;if(pg>__r.total-1)pg=__r.total-1;
+              return pg;}
+            /** 按目录标题文本找首个匹配块：优先精确相等，跳过整章级大容器。 */
+            function __findByText(t){var es=__els();
+              var tt=String(t||'').replace(/\s+/g,'');if(!tt)return null;
+              var loose=null;
+              for(var i=0;i<es.length;i++){
+                var s='';try{s=String(es[i].textContent||'').replace(/\s+/g,'');}catch(e){}
+                if(!s||s.length>tt.length*3+24)continue;
+                if(s===tt)return es[i];
+                if(loose===null&&(s.indexOf(tt)>=0||(tt.indexOf(s)>=0&&s.length>=2)))loose=es[i];}
+              return loose;}
             // M3.3：byUser=1 表示用户翻页（Kotlin goTo）→ 置 __touched，
             // 阻止字体就绪后的 __reanchor 重定位覆盖已发生的翻页
             window.__go=function(n,byUser){var t=__r.total;n=Math.max(0,Math.min(n,t-1));
@@ -167,13 +205,14 @@ class BookActivity : Activity() {
                 var p3=Math.round(a.frac*(__r.total-1));
                 if(p3>=0&&p3!==__r.page)__go(p3);}
               else if(a.frag!==undefined&&a.frag!==null){
-                var fe=null;try{fe=document.querySelector('[data-srch0]');}catch(e){}
-                if(!fe){try{fe=document.getElementById(a.frag);}catch(e){}}
-                if(fe){var fr=fe.getBoundingClientRect();
-                  var fx=fr.left+__r.page*__r.W;
-                  var p4=Math.floor((fx-__r.M)/__r.W);
-                  if(!(p4>=0))p4=0;if(p4>__r.total-1)p4=__r.total-1;
-                  if(p4!==__r.page)__go(p4);}}}
+                // 0.4.23：先按真实锚 id 命中（目录/交叉引用），避免被残留的
+                // data-srch0 拽回上一次搜索命中处；仅搜索专用锚(srch0)走属性回退。
+                var fe=null;try{fe=document.getElementById(a.frag);}catch(e){}
+                if(!fe){try{fe=document.querySelector('[data-srch0]');}catch(e){}}
+                if(fe){var p4=__pageOfNode(fe);if(p4>=0&&p4!==__r.page)__go(p4);}}
+              else if(a.text!==undefined&&a.text!==null){
+                var ft=window.__tocHit||__findByText(a.text);window.__tocHit=ft;
+                if(ft){var p5=__pageOfNode(ft);if(p5>=0&&p5!==__r.page)__go(p5);}}}
             window.__initReader=function(W,G,Mx,anchor,Vx,Bx){__r.W=W||0;__r.G=G||0;__r.M=Mx||0;__r.V=Vx||34;__r.B=Bx||0;__meas();
               window.__initAnchor=anchor||null;window.__touched=false;window.__initDone=false;
               var de=document.documentElement;de.scrollLeft=0;de.scrollTop=0;
@@ -182,22 +221,14 @@ class BookActivity : Activity() {
                 var p=__pageOfElem(anchor.elem);pg=p>=0?p:Math.max(0,Math.min(anchor.fb||0,__r.total-1));}
               else if(anchor&&anchor.frac!==undefined){pg=Math.round(anchor.frac*(__r.total-1));}
               else if(anchor&&anchor.frag){
-                // 同文件多标题/搜索锚：定位到目标所在页（换算内容坐标，不依赖当前位移）
-                // M3.2：Kotlin 注入改用 data-srch0 属性（保留原 id），getElementById 未命中时按属性找；
-                // 目标若仍在 data-fnhide 内（rect 全零会导致页码算成 0/章首）→ 现场移除隐藏标记再测
+                // 同文件多标题/搜索锚：先按真实 id 命中，未命中才回退 data-srch0
                 var fe=null;try{fe=document.getElementById(anchor.frag);}catch(e){}
                 if(!fe){try{fe=document.querySelector('[data-srch0]');}catch(e){}}
-                if(fe){var fr=fe.getBoundingClientRect();
-                  if(fr.width<=0&&fr.height<=0){var anc=fe;
-                    while(anc&&anc.nodeType===1){
-                      if(anc.getAttribute&&anc.getAttribute('data-fnhide')!==null){
-                        anc.removeAttribute('data-fnhide');__meas();
-                        fr=fe.getBoundingClientRect();break;}
-                      anc=anc.parentNode;}}
-                  var fx=fr.left+__r.page*__r.W;
-                  pg=Math.floor((fx-__r.M)/__r.W);
-                  if(!(pg>=0))pg=0;if(pg>__r.total-1)pg=__r.total-1;}
-                else pg=0;}
+                pg=__pageOfNode(fe);if(pg<0)pg=0;}
+              else if(anchor&&anchor.text){
+                // 0.4.23：无 #frag 的同文件多标题——按标题文本定位到首个匹配块所在页
+                var ft=__findByText(anchor.text);window.__tocHit=ft;
+                pg=__pageOfNode(ft);if(pg<0)pg=0;}
               else if(anchor&&anchor.page!==undefined){pg=(anchor.page<0)?__r.total-1:Math.min(anchor.page,__r.total-1);}
               __go(pg);
               window.__initDone=true;
@@ -358,15 +389,27 @@ class BookActivity : Activity() {
         data class Elem(val ord: Int, val fallbackPage: Int) : Anchor()
         data class Frac(val f: Double) : Anchor()
         data class Frag(val id: String) : Anchor()  // M2.1：同文件多标题（#fragment）跳转
+        /** 0.4.23：NCX/NAV 未给 #frag 但同一 html 有多个小节标题时，按标题文本定位。 */
+        data class TocText(val text: String) : Anchor()
         object First : Anchor()
         object Last : Anchor()
     }
 
     private val ui = Handler(Looper.getMainLooper())
+    /** 统一后台线程池：onDestroy 可 shutdownNow，取代无法取消的裸 Thread。 */
+    private val io: ExecutorService = Executors.newFixedThreadPool(3) { r ->
+        Thread(r, "onlyread-reader-io").apply { isDaemon = true }
+    }
+    /** 页面销毁标志：后台任务、JS 回调、资源拦截据此提前退出。 */
+    @Volatile
+    private var destroyed = false
     private var bookId = -1L
     private var spineIndex = 0
+    @Volatile
     private var archive: EpubArchive? = null
+    @Volatile
     private var epub: EpubBook? = null
+    @Volatile
     private var toc: List<TocRow> = emptyList()
 
     // 分页几何（CSS px）与状态
@@ -392,6 +435,7 @@ class BookActivity : Activity() {
     @Volatile
     private var fontFam = ""        // ''=书内 / serif / sans / custom
     // M3.10：当前书 CSS 声明的字体名（自定义字体缺字时按字符回退到它们），后台线程提取
+    @Volatile
     private var bookFonts: List<String> = emptyList()
     private var mL = 16            // 左边距（CSS px，M2.2 可自定义）
     private var mR = 16            // 右边距
@@ -408,8 +452,19 @@ class BookActivity : Activity() {
     private var curDir = ""             // 当前章节目录（弹注 baseURL，解析相对 CSS/图片）
     private var curSpinePath = ""       // 当前章节 zip 内路径（同文件脚注解析基准）
     private var curFnPath = ""          // 当前弹注内容来源文件（弹注内点击注释标记的解析基准）
-    private var pendingSrchHtml = HashMap<Int, Pair<String, String>>() // M3：搜索高亮覆盖 (spineIdx → html/charset)
+    // 0.4.22：搜索高亮覆盖由后台线程写、加载章节的后台线程读，必须并发容器
+    private val pendingSrchHtml = ConcurrentHashMap<Int, Pair<String, String>>() // (spineIdx → html/charset)
+    @Volatile
     private var pendingFnHtml: String? = null // M3.3：搜索命中注释 → 章节渲染完成后自动弹注的内容
+
+    /** 0.4.23：目录 / 阅读设置 / 全文搜索共用同一浮层（80vw×80vh 居中，跟随主题）。 */
+    private var menuOverlay: ViewGroup? = null
+    private var menuIsSearch = false     // 当前浮层是否搜索（关闭时需打断扫描）
+    /** 0.4.23：目录当前项——最近一次目录跳转的 ord，及当前页命中的标题锚点 frag。 */
+    private var activeTocOrd = -1
+    private var lastTocFrag = ""
+    /** 外链 CSS 改写结果缓存：key = 相对路径 + 当前前置字体栈。 */
+    private val cssCache = ConcurrentHashMap<String, ByteArray>()
 
     private lateinit var webView: WebView
     private lateinit var infoBar: TextView
@@ -417,6 +472,18 @@ class BookActivity : Activity() {
     private lateinit var touchOverlay: View
     private var curTitle = "" // 当前章节标题（顶部信息条）
     private val bridge = Bridge() // 主阅读器与弹注弹层共用同一 JS 桥
+
+    /** 统一后台入口：Activity 销毁后不再执行，异常留痕（不再静默吞）。 */
+    private fun onIo(block: () -> Unit) {
+        io.execute {
+            if (destroyed) return@execute
+            try {
+                block()
+            } catch (e: Exception) {
+                Logx.w(TAG, "阅读器后台任务失败", e)
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -460,7 +527,7 @@ class BookActivity : Activity() {
             }
         }
 
-        Thread { openBook() }.start()
+        onIo { openBook() }
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -492,7 +559,8 @@ class BookActivity : Activity() {
                     is Anchor.Page -> String.format(Locale.US, "{\"page\":%d}", a.n)
                     is Anchor.Elem -> String.format(Locale.US, "{\"elem\":%d,\"fb\":%d}", a.ord, a.fallbackPage)
                     is Anchor.Frac -> String.format(Locale.US, "{\"frac\":%.4f}", a.f)
-                    is Anchor.Frag -> "{\"frag\":\"" + a.id.replace("\\", "\\\\").replace("\"", "\\\"") + "\"}"
+                    is Anchor.Frag -> "{\"frag\":" + org.json.JSONObject.quote(a.id) + "}"
+                    is Anchor.TocText -> "{\"text\":" + org.json.JSONObject.quote(a.text) + "}"
                     is Anchor.Last -> "{\"page\":-1}"
                     else -> "{\"page\":0}"
                 }
@@ -579,12 +647,19 @@ class BookActivity : Activity() {
 
     private inner class Bridge {
         @JavascriptInterface
-        fun onLayout(page: Int, total: Int, anchor: Int) {
+        fun onLayout(page: Int, total: Int, anchor: Int, tocFrag: String) {
+            if (destroyed) return
             ui.post {
                 gotReport = true
                 curPage = page
                 curTotal = total.coerceAtLeast(1)
                 curAnchor = anchor
+                // 0.4.23：__report 回报当前页所属目录标题锚点，供目录当前项定位
+                lastTocFrag = tocFrag
+                if (tocFrag.isNotEmpty()) {
+                    toc.firstOrNull { it.spineIndex == spineIndex && it.frag == tocFrag }
+                        ?.let { activeTocOrd = it.ord }
+                }
                 if (!scrollMode) updateInfo()
                 saveProgress()
                 // M3.3：搜索命中注释 → 页面就绪后弹出注释内容（一次性）
@@ -599,30 +674,35 @@ class BookActivity : Activity() {
         /** M2：脚注内容回报（同文档 # 锚点由命中测试转发） */
         @JavascriptInterface
         fun onFootnote(html: String) {
+            if (destroyed) return
             ui.post { showFootnote(html) }
         }
 
         /** M2.2：跨文件脚注回报（命中测试转发，URL 已解析为 reader.local 绝对地址） */
         @JavascriptInterface
         fun onCrossRef(url: String) {
+            if (destroyed) return
             ui.post { openCrossRef(url) }
         }
 
         /** M2：图片点击回报（URL 已解析为 reader.local 绝对地址） */
         @JavascriptInterface
         fun onImage(url: String) {
+            if (destroyed) return
             ui.post { showImage(url) }
         }
 
         /** M2.2：弹注内点击注释标记 → 就地刷新弹注为所引注释内容（复用跨文件提取链路） */
         @JavascriptInterface
         fun onPopupRef(url: String) {
+            if (destroyed) return
             ui.post { openCrossRef(url) }
         }
 
         /** M2.2：弹注文档高度上报（CSS px）→ 窗口定高 */
         @JavascriptInterface
         fun onFnH(cssH: String) {
+            if (destroyed) return
             val h = cssH.toFloatOrNull() ?: return
             ui.post { applyFnHeight(h) }
         }
@@ -631,6 +711,7 @@ class BookActivity : Activity() {
          *  0.4.6 的"抬手显示"在长按选择手势下收不到 touchend（ACTION_CANCEL），已回退） */
         @JavascriptInterface
         fun onSelection(text: String, l: Float, t: Float, r: Float, b: Float) {
+            if (destroyed) return
             // 弹注浮层打开期间，selectionchange 只能来自弹注 WebView（主 WebView 被遮罩覆盖）
             val fromFn = fnWv?.parent != null
             ui.post {
@@ -642,6 +723,7 @@ class BookActivity : Activity() {
         /** JS 异常回显：分页初始化失败时能在信息条看到原因 */
         @JavascriptInterface
         fun onJsError(msg: String) {
+            if (destroyed) return
             ui.post {
                 if (!gotReport) {
                     bottomBar.text = "JS: ${msg.take(70)}"
@@ -661,7 +743,8 @@ class BookActivity : Activity() {
         val db = (application as App).db
         val record = try {
             db.getById(bookId)
-        } catch (_: Exception) {
+        } catch (ex: Exception) {
+            Logx.w(TAG, "操作失败，按回退逻辑继续", ex)
             null
         }
         if (record == null) {
@@ -676,7 +759,8 @@ class BookActivity : Activity() {
             val file = File(record.path)
             if (!file.isFile) null
             else EpubArchive(file).use { it.parseBook() }?.let { book -> Pair(file, book) }
-        } catch (_: Exception) {
+        } catch (ex: Exception) {
+            Logx.w(TAG, "操作失败，按回退逻辑继续", ex)
             null
         }
         if (parsed == null) {
@@ -693,15 +777,17 @@ class BookActivity : Activity() {
         // 目录入库（replaceToc 全量写库）与书架活跃时间延后，不阻塞首章渲染
         val p = try {
             db.getProgress(bookId)
-        } catch (_: Exception) {
+        } catch (ex: Exception) {
+            Logx.w(TAG, "操作失败，按回退逻辑继续", ex)
             null
         }
         ui.post {
             // 打开大书/复杂书时先给一条加载反馈，避免 WebView 渲染前的空白等待期毫无响应
             bottomBar.visibility = View.VISIBLE
             bottomBar.text = getString(R.string.opening)
-            if (p != null && epub != null && epub!!.spine.isNotEmpty()) {
-                val si = p.spineIndex.coerceIn(0, epub!!.spine.size - 1)
+            val b = epub
+            if (p != null && b != null && b.spine.isNotEmpty()) {
+                val si = p.spineIndex.coerceIn(0, b.spine.size - 1)
                 loadSpine(si, if (p.elemOrdinal >= 0) Anchor.Elem(p.elemOrdinal, p.pageIndex) else Anchor.Page(p.pageIndex))
             } else {
                 loadSpine(0, Anchor.First)
@@ -713,21 +799,25 @@ class BookActivity : Activity() {
         }
         if (tocRows.isNotEmpty()) {
             ui.post { toc = tocRows }
-            Thread {
-                try { db.replaceToc(bookId, tocRows) } catch (_: Exception) {}
-                try { db.touch(bookId, System.currentTimeMillis()) } catch (_: Exception) {}
-            }.start()
+            onIo {
+                runCatching { db.replaceToc(bookId, tocRows) }
+                    .onFailure { Logx.w(TAG, "目录缓存写入失败", it) }
+                runCatching { db.touch(bookId, System.currentTimeMillis()) }
+                    .onFailure { Logx.w(TAG, "更新阅读时间失败", it) }
+            }
         } else {
             // 本次解析无目录（罕见）：回退 DB 缓存；touch 仍延后
             val cached = try {
                 db.getToc(bookId)
-            } catch (_: Exception) {
+            } catch (ex: Exception) {
+                Logx.w(TAG, "操作失败，按回退逻辑继续", ex)
                 emptyList()
             }
             ui.post { toc = cached }
-            Thread {
-                try { db.touch(bookId, System.currentTimeMillis()) } catch (_: Exception) {}
-            }.start()
+            onIo {
+                runCatching { db.touch(bookId, System.currentTimeMillis()) }
+                    .onFailure { Logx.w(TAG, "更新阅读时间失败", it) }
+            }
         }
     }
 
@@ -749,7 +839,7 @@ class BookActivity : Activity() {
         }
         if (index < 0 || index >= book.spine.size) return
         val item = book.spine[index]
-        Thread {
+        onIo {
             // 优先使用搜索高亮注入的章节内容（用后即弃）；否则从 zip 解压原文
             val ov = pendingSrchHtml.remove(index)
             val (rawHtml, charset) = if (ov != null) {
@@ -757,14 +847,15 @@ class BookActivity : Activity() {
             } else {
                 val bytes = try {
                     arch.entryBytes(item.path)
-                } catch (_: Exception) {
+                } catch (ex: Exception) {
+                    Logx.w(TAG, "操作失败，按回退逻辑继续", ex)
                     null
                 }
                 if (bytes == null) {
                     ui.post {
                         Toast.makeText(this@BookActivity, "章节内容缺失：${item.href}", Toast.LENGTH_SHORT).show()
                     }
-                    return@Thread
+                    return@onIo
                 }
                 val cs = ZipPaths.detectCharset(bytes)
                 Pair(String(bytes, cs), cs.name())
@@ -780,13 +871,13 @@ class BookActivity : Activity() {
             // M3.10：书内 CSS 字体名在后台线程提取（含外链 CSS 读取），三种模式共用回退链
             val fonts = ReaderHtml.bookFontFamilies(
                 rawHtml,
-                if (fontFam.isNotEmpty()) linkedCssTexts(arch, item.path, rawHtml) else emptyList()
+                if (fontFam.isNotEmpty()) ReaderFragments.linkedCssTexts(arch, item.path, rawHtml) else emptyList()
             )
             ui.post {
                 bookFonts = fonts
                 awaitLayout { doLoad(index, anchor, item.path, styledHtml, charset) }
             }
-        }.start()
+        }
     }
 
     private fun awaitLayout(action: () -> Unit) {
@@ -799,11 +890,11 @@ class BookActivity : Activity() {
                     if (webView.width > 0 && webView.height > 0) {
                         action()
                     } else if (tries++ < 30) {
-                        webView.postDelayed(this, 50)
+                        ui.postDelayed(this, 50)
                     }
                 }
             }
-            webView.postDelayed(r, 50)
+            ui.postDelayed(r, 50)
         }
     }
 
@@ -819,6 +910,22 @@ class BookActivity : Activity() {
         spineIndex = index
         curPage = 0
         curTotal = 1
+        // 0.4.23：目录点击已在 openToc 设好精确 ord；这里只在「锚点来自书内链接 /
+        // 进度恢复」等其它入口推断，且绝不覆盖仍属于本章的有效 ord（重复标题场景）。
+        if (anchor is Anchor.Frag || anchor is Anchor.TocText) {
+            val stillValid = activeTocOrd >= 0 &&
+                toc.any { it.ord == activeTocOrd && it.spineIndex == index }
+            if (!stillValid) {
+                activeTocOrd = when (anchor) {
+                    is Anchor.Frag -> toc.firstOrNull { it.spineIndex == index && it.frag == anchor.id }?.ord ?: -1
+                    is Anchor.TocText -> toc.firstOrNull { it.spineIndex == index && it.title == anchor.text }?.ord ?: -1
+                    else -> -1
+                }
+            }
+        } else {
+            activeTocOrd = -1
+        }
+        lastTocFrag = ""
         // M2.2：当前章节标题（优先目录命中，否则取文件名）
         curTitle = toc.firstOrNull { it.spineIndex == index }?.title
             ?: itemPath.substringAfterLast('/').substringBeforeLast('.').ifBlank { "正文" }
@@ -853,7 +960,12 @@ class BookActivity : Activity() {
             "[data-fnhide][data-fnshow]{display:block !important;}" +
             "</style>"
         // ⚠️ INIT_JS 必须随页面注入（此前只在 onPageFinished 里调用导致 window.__initReader 未定义，分页失效）
+        // 0.4.23：本章目录锚点交给 JS，__report 由此回报「当前页属于哪个标题」
+        val tocFrags = org.json.JSONArray(
+            toc.filter { it.spineIndex == index && it.frag.isNotEmpty() }.map { it.frag }
+        ).toString()
         val script = "<script>" + INIT_JS +
+            "window.__tocFrags=" + tocFrags + ";" +
             "window.onerror=function(m,s,l){try{ReaderBridge.onJsError(String(m)+'@'+l);}catch(e){}}" +
             "</script>"
         // 备注：markedHtml 已由后台线程的 ReaderHtml.markChapterForReader 生成（含 data-fnhide 标记与保留的 data-srch0）；
@@ -908,7 +1020,7 @@ class BookActivity : Activity() {
         }
         if (curPage < curTotal - 1) {
             goTo(curPage + 1)
-        } else if (epub != null && spineIndex < epub!!.spine.size - 1) {
+        } else if (epub?.let { spineIndex < it.spine.size - 1 } == true) {
             loadSpine(spineIndex + 1, Anchor.First)
         }
     }
@@ -945,6 +1057,10 @@ class BookActivity : Activity() {
     /** M3：返回键分层——先关图片查看，再关选区菜单，再关弹注浮层，最后才退 Activity */
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
+        if (menuOverlay != null) {
+            closeMenuOverlay()
+            return
+        }
         if (imgOverlay != null) {
             closeImgOverlay()
             return
@@ -964,13 +1080,13 @@ class BookActivity : Activity() {
         // M3：弹注弹层跟随主界面菜单——主菜单打开时先收起弹注（避免叠层）
         if (fnPanel != null) closeFnPanel()
         // M3：目录列表中排除 NAV（目录文件）自身条目——它不作为正文渲染。
-        // M3.5：按 navPaths 全集过滤（多 nav/不规范书也排除）
         val navs = epub?.navPaths?.ifEmpty { epub?.navPath?.let { setOf(it) } ?: emptySet() } ?: emptySet()
         val rows = if (navs.isNotEmpty()) toc.filter { epub?.spine?.getOrNull(it.spineIndex)?.path !in navs } else toc
         if (rows.isEmpty()) {
             openSettings() // 无目录时中键直达阅读设置
             return
         }
+        val d = resources.displayMetrics.density
         // M3：多级目录自动折叠——初始只展开当前章节的各级父级；点击带子级的条目展开/收起
         val expanded = HashSet<Int>()
         var filter = "" // 目录过滤关键词（非空时忽略折叠状态，只列标题命中的条目）
@@ -984,39 +1100,43 @@ class BookActivity : Activity() {
                 }
             }
         }
-        // 当前章节：spineIndex 匹配的最后一条目录行（同文件多标题时取最深）
-        var curTocIdx = -1
-        rows.forEachIndexed { i, r ->
-            if (r.spineIndex == spineIndex) curTocIdx = i
-        }
+        // 0.4.23：目录当前项按「当前页锚 frag → 最近跳转 ord → 该章第一条」依次回退。
+        // 旧实现无条件取 spineIndex 匹配的最后一条，导致同一 html 内多个标题时
+        // 无论读到哪一节，打开目录都只高亮/滚动到最后一个标题。
+        val tocItems = rows.map { ReaderFragments.TocItem(it.ord, it.spineIndex, it.frag) }
+        val curTocIdx = ReaderFragments.currentTocIndex(tocItems, spineIndex, lastTocFrag, activeTocOrd)
         if (curTocIdx >= 0) expandAncestorsOf(curTocIdx)
         fun hasChildren(i: Int): Boolean = i + 1 < rows.size && rows[i + 1].level > rows[i].level
         fun visibleIdx(): List<Int> {
-            // 过滤模式：忽略折叠状态，只列标题命中的条目（缩进仍按 level 保留层级感）
             if (filter.isNotEmpty()) {
                 return rows.indices.filter { rows[it].title.contains(filter, ignoreCase = true) }
             }
-            // level==0 恒可见；否则要求全部祖先都在 expanded 中
             val out = ArrayList<Int>()
             for (i in rows.indices) {
                 if (rows[i].level == 0) { out.add(i); continue }
                 var anc = i
                 var show = true
                 while (true) {
-                    var p = -1
+                    var parent = -1
                     for (j in anc - 1 downTo 0) {
-                        if (rows[j].level < rows[anc].level) { p = j; break }
+                        if (rows[j].level < rows[anc].level) { parent = j; break }
                     }
-                    if (p < 0) break
-                    if (p !in expanded) { show = false; break }
-                    anc = p
+                    if (parent < 0) break
+                    if (parent !in expanded) { show = false; break }
+                    anc = parent
                 }
                 if (show) out.add(i)
             }
             return out
         }
         val visible = ArrayList(visibleIdx())
-        val listView = android.widget.ListView(this)
+        val listView = android.widget.ListView(this).apply {
+            divider = android.graphics.drawable.ColorDrawable(themeFaded(0x22))
+            dividerHeight = 1
+            setBackgroundColor(Color.TRANSPARENT)
+            setCacheColorHint(Color.TRANSPARENT) // 滚动时不出系统默认色块
+            isVerticalScrollBarEnabled = false
+        }
         val adapter = object : BaseAdapter() {
             override fun getCount(): Int = visible.size
             override fun getItem(position: Int): Any = rows[visible[position]]
@@ -1024,7 +1144,6 @@ class BookActivity : Activity() {
             override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
                 val idx = visible[position]
                 val r = rows[idx]
-                // M3：行=标题+独立三角钮——点行跳转，点三角展开/收起（三角放大）
                 val row = convertView as? LinearLayout ?: LinearLayout(this@BookActivity).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = android.view.Gravity.CENTER_VERTICAL
@@ -1036,8 +1155,8 @@ class BookActivity : Activity() {
                         id = 0x7f000002
                         textSize = 19f
                         gravity = android.view.Gravity.CENTER
-                        val p = (10 * resources.displayMetrics.density).toInt()
-                        setPadding(p, p, p, p) // 加大点击热区
+                        val q = (10 * resources.displayMetrics.density).toInt()
+                        setPadding(q, q, q, q)
                     }
                     addView(title, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
                     addView(caret)
@@ -1046,49 +1165,29 @@ class BookActivity : Activity() {
                 val caret = row.findViewById<TextView>(0x7f000002)
                 val pad = (16 + r.level * 20) * resources.displayMetrics.density.toInt()
                 tv.text = r.title
-                tv.setTextColor(
-                    if (idx == curTocIdx) Color.parseColor(pal().link)
-                    else getColor(R.color.text_main)
-                )
+                tv.setTextColor(if (idx == curTocIdx) themeLink() else themeText())
                 tv.setPadding(pad, 24, 12, 24)
                 if (filter.isEmpty() && hasChildren(idx)) {
                     caret.text = if (idx in expanded) "▾" else "▸"
-                    caret.setTextColor(getColor(R.color.text_sub))
+                    caret.setTextColor(themeFaded(0x99))
                     caret.setOnClickListener {
-                        if (filter.isNotEmpty()) return@setOnClickListener // 过滤态不参与折叠
+                        if (filter.isNotEmpty()) return@setOnClickListener
                         if (idx in expanded) expanded.remove(idx) else expanded.add(idx)
                         visible.clear(); visible.addAll(visibleIdx())
-                        notifyDataSetChanged() // 外层 BaseAdapter 自身
+                        notifyDataSetChanged()
                     }
                     caret.visibility = View.VISIBLE
                 } else {
-                    caret.visibility = View.INVISIBLE // 占位对齐（过滤态下也隐藏三角）
+                    caret.visibility = View.INVISIBLE
                 }
                 return row
             }
         }
         listView.adapter = adapter
-        val d = resources.displayMetrics.density
-        // 目录窗口几何：顶部固定（gravity TOP + 固定 y），底部随输入法上移；
-        // 列表高度由窗口高度驱动，过滤框与三个按钮始终留在可视区内
-        val screenH = resources.displayMetrics.heightPixels
-        val baseH = (screenH * 0.80f).toInt() // M3.8：目录窗口高度对齐搜索窗口（80% 屏高）
-        val topY = ((screenH - baseH) / 2f).toInt().coerceAtLeast(0)
-        val reserve = (200 * d).toInt() // 标题栏 + 按钮栏 + 过滤框 + 内边距
-        val minH = (320 * d).toInt()
-        val minListH = (100 * d).toInt()
-        val listLp = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, (baseH - reserve).coerceAtLeast(minListH)
-        )
-        val filterEt = android.widget.EditText(this).apply {
-            hint = getString(R.string.toc_filter_hint)
-            textSize = 14f
-            setSingleLine()
+        // 过滤框置于内容顶部：浮层固定 80vw×80vh 居中且不上移，IME 从底部弹出时
+        // 输入框仍在可视区内（旧实现放在底部，被键盘遮挡）。
+        val filterEt = themeEditText(getString(R.string.toc_filter_hint)).apply {
             imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE
-            setPadding((12 * d).toInt(), (10 * d).toInt(), (12 * d).toInt(), (10 * d).toInt())
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
-            )
             addTextChangedListener(object : android.text.TextWatcher {
                 override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
                 override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
@@ -1099,68 +1198,42 @@ class BookActivity : Activity() {
                 override fun afterTextChanged(s: android.text.Editable?) {}
             })
         }
-        // 顺序：目录 → 过滤框 → AlertDialog 自带的三个按钮
-        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        box.addView(listView, listLp)
-        box.addView(filterEt)
-        val dlg = AlertDialog.Builder(this, dialogTheme())
-            .setTitle(R.string.toc_title)
-            .setView(box)
-            .setPositiveButton(R.string.settings_title) { _, _ -> openSettings() }
-            .setNeutralButton(R.string.search_title) { _, _ -> showSearch() }
-            .setNegativeButton(R.string.action_cancel, null)
-            .create()
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            val q = (10 * d).toInt()
+            addView(filterEt, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(q, q, q, q) })
+            addView(View(this@BookActivity).apply { setBackgroundColor(themeFaded(0x22)) },
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1))
+            addView(listView, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        }
         listView.setOnItemClickListener { _, _, which, _ ->
             val idx = visible.getOrNull(which) ?: return@setOnItemClickListener
-            // M3：点行=跳转（父级目录也跳转）；展开/收起只由三角形负责
             val r = rows[idx]
+            activeTocOrd = r.ord
             if (r.spineIndex >= 0) {
-                loadSpine(r.spineIndex, if (r.frag.isNotEmpty()) Anchor.Frag(r.frag) else Anchor.First)
-            }
-            dlg.dismiss()
-        }
-        dlg.show()
-        dlg.setCanceledOnTouchOutside(true)
-        dlg.window?.let { w ->
-            // ADJUST_NOTHING：系统既不平移也不缩放窗口，配合 gravity TOP + 固定 y，
-            // 保证输入法弹出前后「顶部不变」；窗口高度由下方逻辑主动压缩 → 底部上移
-            w.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
-            val a = w.attributes
-            a.gravity = android.view.Gravity.TOP
-            a.y = topY
-            a.height = baseH
-            w.attributes = a
-            var kb = 0 // 本次键盘弹起过程中的最大高度，避免窗口压缩后 insets 变小引起抖动
-            fun setTocHeight(h: Int) {
-                val wantList = (h - reserve).coerceAtLeast(minListH)
-                val cur = w.attributes
-                if (cur.height == h && listView.layoutParams.height == wantList) return
-                cur.height = h
-                w.attributes = cur
-                listView.layoutParams.height = wantList
-                listView.requestLayout()
-            }
-            fun applyTocHeight(k: Int) {
-                kb = maxOf(kb, k)
-                setTocHeight(minOf(baseH, (screenH - kb - topY).coerceAtLeast(minH)))
-            }
-            w.decorView.setOnApplyWindowInsetsListener { _, insets ->
-                if (insets.isVisible(WindowInsets.Type.ime())) {
-                    applyTocHeight(insets.getInsets(WindowInsets.Type.ime()).bottom)
-                } else {
-                    kb = 0
-                    setTocHeight(baseH)
+                // 0.4.23：NCX/NAV 未给 #frag 但同一 html 有多个标题时，
+                // 按标题文本定位，避免所有条目都落到章首（旧行为）。
+                val a = when {
+                    r.frag.isNotEmpty() -> Anchor.Frag(r.frag)
+                    rows.count { it.spineIndex == r.spineIndex } > 1 -> Anchor.TocText(r.title)
+                    else -> Anchor.First
                 }
-                insets
+                loadSpine(r.spineIndex, a)
             }
-            // 兜底：少数 ROM 在 ADJUST_NOTHING 下不分发 IME insets，
-            // 过滤框获焦时按常见键盘高度预估压缩，失焦时恢复
-            filterEt.setOnFocusChangeListener { _, hasFocus ->
-                if (hasFocus) applyTocHeight((screenH * 0.42f).toInt())
-                else { kb = 0; setTocHeight(baseH) }
-            }
+            closeMenuOverlay()
         }
-        // M3：目录自动定位——当前章节滚到屏幕中部（列表不足一屏时 setSelectionFromTop 无副作用）
+        showMenuOverlay(
+            getString(R.string.toc_title), content,
+            listOf(
+                getString(R.string.settings_title) to { closeMenuOverlay(); openSettings() },
+                getString(R.string.search_title) to { closeMenuOverlay(); showSearch() },
+                getString(R.string.action_cancel) to { closeMenuOverlay() }
+            )
+        )
+        // M3：目录自动定位——当前章节滚到屏幕中部
         if (curTocIdx >= 0) {
             val pos = visible.indexOf(curTocIdx)
             if (pos > 0) {
@@ -1186,7 +1259,8 @@ class BookActivity : Activity() {
     private fun highlightLabel(h: SearchHit): CharSequence {
         val re = try {
             Regex(h.query, RegexOption.IGNORE_CASE)
-        } catch (_: Exception) {
+        } catch (ex: Exception) {
+            Logx.w(TAG, "操作失败，按回退逻辑继续", ex)
             return h.label
         }
         val sp = android.text.SpannableString(h.label)
@@ -1209,31 +1283,31 @@ class BookActivity : Activity() {
     // M3.4：searchHits 整体替换（不可变快照）+ 会话令牌——过期线程的 UI 更新被丢弃，
     // 修复"本章搜索后不显示结果、重开才显示"（旧线程收尾 post 覆盖/竞态）
     private var searchHits: List<SearchHit> = emptyList()
+    @Volatile
     private var searchCancelled = false
+    @Volatile
     private var searchSession = 0
     private var searchPool: java.util.concurrent.ExecutorService? = null
 
     /** 搜索弹窗：正则（恒启用）+ 全书/当前章扫描 + Reasily 式按章聚合结果 + 点击跳转高亮 */
     private fun showSearch(prefill: String? = null) {
-        if (epub == null) return
+        if (epub == null || destroyed) return
+        if (menuOverlay != null) closeMenuOverlay() // 不叠加两个菜单浮层
+        if (fnPanel != null) closeFnPanel()
         val d = resources.displayMetrics.density
         val box = android.widget.LinearLayout(this).apply {
             orientation = android.widget.LinearLayout.VERTICAL
             setPadding((16 * d).toInt(), (12 * d).toInt(), (16 * d).toInt(), 0)
         }
         val row = android.widget.LinearLayout(this).apply { orientation = android.widget.LinearLayout.HORIZONTAL }
-        val et = android.widget.EditText(this).apply {
-            hint = getString(R.string.search_hint)
+        val et = themeEditText(getString(R.string.search_hint)).apply {
             textSize = 15f
-            setSingleLine()
             imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH
             layoutParams = android.widget.LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
         var scopeAll = true // M3：范围切换（全书/当前章）
-        val scopeBtn = android.widget.Button(this).apply {
+        val scopeBtn = themeFlatButton("范围：全书").apply {
             textSize = 12f
-            isAllCaps = false
-            text = "范围：全书"
             setOnClickListener {
                 scopeAll = !scopeAll
                 text = if (scopeAll) "范围：全书" else "范围：本章"
@@ -1245,10 +1319,8 @@ class BookActivity : Activity() {
         var onVariantsToggle: () -> Unit = {}
         // 启动时字表读取异常 / 回退内置表：本次打开搜索窗口提示一次
         val variantsErr = VariantsStore.consumeError()
-        val variantsBtn = android.widget.Button(this).apply {
+        val variantsBtn = themeFlatButton(if (variantsOn) "异体字：开" else "异体字：关").apply {
             textSize = 12f
-            isAllCaps = false
-            text = if (variantsOn) "异体字：开" else "异体字：关"
             setOnClickListener {
                 variantsOn = !variantsOn
                 ReaderPrefs.setVariantsOn(this@BookActivity, variantsOn)
@@ -1263,10 +1335,16 @@ class BookActivity : Activity() {
         row2.addView(variantsBtn)
         val status = TextView(this).apply {
             textSize = 12f
-            setTextColor(getColor(R.color.text_sub))
+            setTextColor(themeFaded(0xBB))
             setPadding(0, (8 * d).toInt(), 0, (4 * d).toInt())
         }
-        val lv = android.widget.ListView(this)
+        val lv = android.widget.ListView(this).apply {
+            divider = android.graphics.drawable.ColorDrawable(themeFaded(0x22))
+            dividerHeight = 1
+            setBackgroundColor(Color.TRANSPARENT)
+            setCacheColorHint(Color.TRANSPARENT)
+            isVerticalScrollBarEnabled = false
+        }
         // M3：Reasily 式聚合展示——章节组头 + 命中片段行
         class G(val title: String)
         class H(val hit: SearchHit)
@@ -1296,13 +1374,13 @@ class BookActivity : Activity() {
                     tv.text = item.title
                     tv.textSize = 14f
                     tv.setTypeface(null, android.graphics.Typeface.BOLD)
-                    tv.setTextColor(Color.parseColor(pal().link))
+                    tv.setTextColor(themeLink())
                     tv.setPadding((4 * d).toInt(), (12 * d).toInt(), (4 * d).toInt(), (2 * d).toInt())
                 } else {
                     tv.text = highlightLabel((item as H).hit)
                     tv.textSize = 14f
                     tv.setTypeface(null, android.graphics.Typeface.NORMAL)
-                    tv.setTextColor(getColor(R.color.text_main))
+                    tv.setTextColor(themeText())
                     tv.setPadding((12 * d).toInt(), (8 * d).toInt(), (8 * d).toInt(), (8 * d).toInt())
                 }
                 return tv
@@ -1330,9 +1408,10 @@ class BookActivity : Activity() {
         box.addView(row)
         box.addView(row2)
         box.addView(status)
+        // 0.4.23：列表用权重填满 80vh 内容区（旧版固定 430dp 在大屏留白、小屏溢出）
         box.addView(
             lv, android.widget.LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, (430 * d).toInt()
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f
             )
         )
         fun runSearch() {
@@ -1405,7 +1484,8 @@ class BookActivity : Activity() {
                             if (searchCancelled || Thread.currentThread().isInterrupted) break
                             val bytes = try {
                                 archive?.entryBytes(book.spine[i].path)
-                            } catch (_: Exception) {
+                            } catch (ex: Exception) {
+                                Logx.w(TAG, "操作失败，按回退逻辑继续", ex)
                                 null
                             } ?: continue
                             val html = String(bytes, ZipPaths.detectCharset(bytes))
@@ -1441,42 +1521,29 @@ class BookActivity : Activity() {
         et.setOnEditorActionListener { _, actionId, _ ->
             if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH) { runSearch(); true } else false
         }
-        val btn = android.widget.Button(this).apply {
-            text = getString(R.string.search_btn)
-            textSize = 13f
-            isAllCaps = false
+        val btn = themeFlatButton(getString(R.string.search_btn)).apply {
             setOnClickListener { if (searching) stopSearch() else runSearch() }
         }
         searchBtn = btn
         row.addView(btn)
         // 去掉底部「取消」按钮：关闭窗口靠点外部/返回键；停止搜索由上方按钮承担
-        val dlg = AlertDialog.Builder(this, dialogTheme())
-            .setTitle(R.string.search_title)
-            .setView(box)
-            .create()
+        // —— 0.4.23：搜索与目录/设置统一为 decorView 浮层（80vw×80vh 居中）——
+        // 0.4.21 用 AlertDialog + SOFT_INPUT_ADJUST_NOTHING 仍被部分 ROM 上推：
+        // Dialog 是 TYPE_APPLICATION_PANEL 子窗口，系统会为保证输入框可见而平移它，
+        // 忽略 ADJUST_NOTHING。改为主窗口内的普通 View 后，Activity 窗口已声明
+        // adjustNothing，浮层坐标由代码写死（Gravity.CENTER），IME 弹出时
+        // 窗口与面板都不发生任何位移，输入框始终在顶部可见。
         lv.setOnItemClickListener { _, _, pos, _ ->
             val item = rows.getOrNull(pos)
             if (item is H) {
-                dlg.dismiss() // dismiss 触发扫描打断；已得结果保留在 searchHits
+                closeSearchOverlay() // 关闭浮层即打断扫描；已得结果保留在 searchHits
                 jumpToSearchHit(item.hit)
             }
         }
-        dlg.setOnDismissListener {
-            searchCancelled = true // 打断扫描，但缓存结果不清除
-            searchPool?.shutdownNow()
-            searchPool = null
-        }
-        dlg.show()
+        // 0.4.23：统一浮层（80vw×80vh 居中、跟随主题）；isSearch=true 使关闭时打断扫描
+        showMenuOverlay(getString(R.string.search_title), box, isSearch = true)
         // M3.10：字表异常 / 回退内置表时提示一次，用户可据此判断关联搜索用了哪份表
         variantsErr?.let { Toast.makeText(this, it, Toast.LENGTH_LONG).show() }
-        dlg.setCanceledOnTouchOutside(true) // 移除「取消」按钮后仍可点外部关闭
-        // 呼出输入法时窗口保持原位、不上移（Activity 已 adjustNothing，Dialog 需单独设置）。
-        // 目录窗口有 IME insets 压缩逻辑，搜索窗口按本版需求保持不动。
-        dlg.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
-        dlg.window?.setLayout(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            (resources.displayMetrics.heightPixels * 0.80f).toInt()
-        )
         // M3：重开弹窗时先展示上次会话已得结果（按章聚合）
         if (searchHits.isNotEmpty()) {
             rebuild()
@@ -1510,16 +1577,18 @@ class BookActivity : Activity() {
         val item = book.spine.getOrNull(h.spineIndex) ?: return
         val re = try {
             Regex(h.query, RegexOption.IGNORE_CASE) // M3：正则恒启用
-        } catch (_: Exception) {
+        } catch (ex: Exception) {
+            Logx.w(TAG, "操作失败，按回退逻辑继续", ex)
             null
         }
-        Thread {
+        onIo {
             val bytes = try {
                 archive?.entryBytes(item.path)
-            } catch (_: Exception) {
+            } catch (ex: Exception) {
+                Logx.w(TAG, "操作失败，按回退逻辑继续", ex)
                 null
             }
-            if (bytes == null) return@Thread
+            if (bytes == null) return@onIo
             val charset = ZipPaths.detectCharset(bytes)
             val html = String(bytes, charset)
             // 内部锚引用目标 id（与 doLoad markedHtml 规则2 同逻辑，用于隐藏判定）
@@ -1534,7 +1603,8 @@ class BookActivity : Activity() {
                         val frag = href.substring(i + 1)
                         refIds += try {
                             java.net.URLDecoder.decode(frag, "UTF-8")
-                        } catch (_: Exception) {
+                        } catch (ex: Exception) {
+                            Logx.w(TAG, "操作失败，按回退逻辑继续", ex)
                             frag
                         }
                     }
@@ -1558,11 +1628,12 @@ class BookActivity : Activity() {
             val b = target
             if (b == null) {
                 ui.post { loadSpine(h.spineIndex, Anchor.First) } // 结构变化兜底：跳章首
-                return@Thread
+                return@onIo
             }
             fun decodeFrag(f: String): String = try {
                 java.net.URLDecoder.decode(f, "UTF-8")
-            } catch (_: Exception) {
+            } catch (ex: Exception) {
+                Logx.w(TAG, "操作失败，按回退逻辑继续", ex)
                 f
             }
             // 命中块隐藏判定（lastIndexOf 省略 startIndex = 全串向左搜）
@@ -1580,7 +1651,7 @@ class BookActivity : Activity() {
                 return Pair(hidden, targetId)
             }
             fun injected(m: MatchResult, mark: Boolean, extra: String): String {
-                val inner = if (mark && re != null) markSrchText(m.groupValues[3], re) else m.groupValues[3]
+                val inner = if (mark && re != null) ReaderFragments.markSrchText(m.groupValues[3], re) else m.groupValues[3]
                 return "<" + m.groupValues[1] + m.groupValues[2] + extra + " data-srch0>" +
                     inner + "</" + m.groupValues[1] + ">"
             }
@@ -1623,7 +1694,7 @@ class BookActivity : Activity() {
                         Regex("(?is)<aside\\b.*?</aside\\s*>").find(html, lastOpen)?.value ?: b.value
                     } else b.value
                 }
-                pendingFnHtml = if (re != null) markSrchText(fnHtml, re) else fnHtml
+                pendingFnHtml = if (re != null) ReaderFragments.markSrchText(fnHtml, re) else fnHtml
                 out = if (ref != null) {
                     // 定位到正文引用块；ref 之后的内容全部保留（含被命中的注释块）——
                     // 0.4.14 曾把注释块从 HTML 移除，导致点〔N〕标记弹出残缺注释/内容丢失
@@ -1636,20 +1707,14 @@ class BookActivity : Activity() {
                 val anchor2 = if (h.spineIndex == spineIndex && curTotal > 0) Anchor.Page(curPage) else Anchor.First
                 pendingSrchHtml.remove(h.spineIndex)
                 ui.post { loadSpine(h.spineIndex, anchor2) }
-                return@Thread
+                return@onIo
             }
             pendingSrchHtml[h.spineIndex] = Pair(out, charset.name())
             ui.post { loadSpine(h.spineIndex, Anchor.Frag("srch0")) }
-        }.start()
+        }
     }
 
-    /** 块内文本段高亮：仅在标签间文本里替换，避免命中串落在属性/标签内造成结构破坏 */
-    private fun markSrchText(inner: String, re: Regex): String =
-        Regex("<[^>]*>|[^<]+").replace(inner) { seg ->
-            val t = seg.value
-            if (t.startsWith("<")) t
-            else re.replace(t) { mm -> "<mark class=\"__srch\">${mm.value}</mark>" }
-        }
+    // 命中文本高亮已迁移至 ReaderFragments.markSrchText（纯函数）
 
     // 可见文本抽取（extractVisibleText）、行内标签判定（isInlineTag）、命中片段（buildSnippet）
     // 与章节注释块标记（markChapterForReader）已迁移至 ReaderHtml 纯函数对象，便于后台线程执行与单元测试。
@@ -1658,9 +1723,151 @@ class BookActivity : Activity() {
 
     private fun pal(): Palette = PALETTES[themeId.coerceIn(0, PALETTES.size - 1)]
 
-    private fun dialogTheme(): Int =
-        if (themeId == ReaderPrefs.THEME_NIGHT) android.R.style.Theme_DeviceDefault_Dialog
-        else android.R.style.Theme_DeviceDefault_Light_Dialog
+    // ————— 0.4.23：三大菜单统一浮层（目录 / 阅读设置 / 全文搜索）—————
+    // 全部挂在 Activity decorView 上：主窗口已声明 adjustNothing，浮层坐标由代码写死，
+    // IME 弹出时窗口与面板都不发生位移（沿用 0.4.22 搜索窗口的「不上移」结论）。
+    // 尺寸与配色统一：宽 80vw、高 80vh、Gravity.CENTER 居中；背景/文字/描边全部取 pal()。
+
+    private fun themeText(): Int = Color.parseColor(pal().text)
+    private fun themeLink(): Int = Color.parseColor(pal().link)
+
+    /** 由主题文字色派生带 alpha 的弱化色（次要文字 / 分隔线 / 描边共用）。 */
+    private fun themeFaded(alpha: Int): Int {
+        val c = Color.parseColor(pal().text)
+        return Color.argb(alpha, Color.red(c), Color.green(c), Color.blue(c))
+    }
+
+    private fun themePanelBg(): android.graphics.drawable.GradientDrawable =
+        android.graphics.drawable.GradientDrawable().apply {
+            setColor(Color.parseColor(pal().bg))
+            cornerRadius = 0f
+            setStroke(1, themeFaded(0x44))
+        }
+
+    /** 输入框背景：主题色淡底 + 主题色描边，避免系统 Light 主题下深色面板里出现白底黑字。 */
+    private fun themeInputBg(): android.graphics.drawable.GradientDrawable =
+        android.graphics.drawable.GradientDrawable().apply {
+            setColor(themeFaded(0x14))
+            cornerRadius = 4 * resources.displayMetrics.density
+            setStroke(1, themeFaded(0x55))
+        }
+
+    /** 统一扁平按钮：主题强调色文字 + 细描边，去掉系统 Button 的浅色实心底。 */
+    private fun themeFlatButton(label: CharSequence): Button = Button(this).apply {
+        text = label
+        textSize = 13f
+        isAllCaps = false
+        setSingleLine()
+        setTextColor(themeLink())
+        background = android.graphics.drawable.GradientDrawable().apply {
+            setColor(Color.TRANSPARENT)
+            cornerRadius = 4 * resources.displayMetrics.density
+            setStroke(1, themeFaded(0x55))
+        }
+        stateListAnimator = null
+        val p = (10 * resources.displayMetrics.density).toInt()
+        setPadding(p * 2, p, p * 2, p)
+        layoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply { setMargins((6 * resources.displayMetrics.density).toInt(), 0, 0, 0) }
+    }
+
+    private fun themeEditText(hintText: CharSequence): android.widget.EditText =
+        android.widget.EditText(this).apply {
+            hint = hintText
+            textSize = 14f
+            setSingleLine()
+            setTextColor(themeText())
+            setHintTextColor(themeFaded(0x99))
+            background = themeInputBg()
+            val p = (12 * resources.displayMetrics.density).toInt()
+            setPadding(p, p, p, p)
+        }
+
+    /**
+     * 显示统一浮层：80vw × 80vh、居中、跟随主题。
+     * @param isSearch 传 true 时关闭浮层会打断全文搜索扫描（等价于旧 closeSearchOverlay）。
+     */
+    private fun showMenuOverlay(
+        title: CharSequence,
+        content: View,
+        buttons: List<Pair<String, () -> Unit>> = emptyList(),
+        isSearch: Boolean = false
+    ) {
+        closeMenuOverlay() // 任意时刻只存在一个菜单浮层
+        val dm = resources.displayMetrics
+        val d = dm.density
+        val w = (dm.widthPixels * 0.80f).toInt()
+        val h = (dm.heightPixels * 0.80f).toInt()
+        val titleView = TextView(this).apply {
+            text = title
+            textSize = 16f
+            setTextColor(themeText())
+            setPadding((16 * d).toInt(), (14 * d).toInt(), (16 * d).toInt(), (12 * d).toInt())
+        }
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = themePanelBg()
+            isClickable = true
+            elevation = 8 * d
+            addView(titleView, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            addView(View(this@BookActivity).apply { setBackgroundColor(themeFaded(0x33)) },
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1))
+            addView(content, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+            if (buttons.isNotEmpty()) {
+                addView(View(this@BookActivity).apply { setBackgroundColor(themeFaded(0x22)) },
+                    LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1))
+                val bar = LinearLayout(this@BookActivity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = android.view.Gravity.END or android.view.Gravity.CENTER_VERTICAL
+                    val q = (8 * d).toInt()
+                    setPadding(q, (6 * d).toInt(), q, (6 * d).toInt())
+                }
+                buttons.forEach { (label, action) ->
+                    bar.addView(themeFlatButton(label).apply { setOnClickListener { action() } })
+                }
+                addView(bar, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            }
+        }
+        val scrim = FrameLayout(this).apply {
+            setBackgroundColor(0x66000000)
+            isClickable = true
+            setOnClickListener { closeMenuOverlay() }
+            addView(panel, FrameLayout.LayoutParams(w, h, android.view.Gravity.CENTER))
+        }
+        (window.decorView as ViewGroup).addView(
+            scrim,
+            ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+        )
+        menuOverlay = scrim
+        menuIsSearch = isSearch
+    }
+
+    /** 关闭统一浮层：移除视图、收起输入法；搜索浮层额外打断扫描并过期在途回报。 */
+    private fun closeMenuOverlay() {
+        val o = menuOverlay ?: return
+        menuOverlay = null
+        (o.parent as? ViewGroup)?.removeView(o)
+        if (menuIsSearch) {
+            menuIsSearch = false
+            searchCancelled = true
+            searchSession++
+            searchPool?.shutdownNow()
+            searchPool = null
+        }
+        runCatching {
+            val imm = getSystemService(Context.INPUT_METHOD_SERVICE)
+                    as? android.view.inputmethod.InputMethodManager
+            imm?.hideSoftInputFromWindow(o.windowToken, 0)
+        }.onFailure { Logx.w(TAG, "收起输入法失败", it) }
+    }
+
+    /** 兼容旧调用名（搜索结果跳转、外部关闭等）。 */
+    private fun closeSearchOverlay() = closeMenuOverlay()
 
     /** 系统栏与信息条随主题换色（窗口侧，页面侧由 #__theme 样式负责） */
     private fun applyThemeChrome() {
@@ -1735,34 +1942,7 @@ class BookActivity : Activity() {
         return p.isNotEmpty() && File(p).exists()
     }
 
-    /**
-     * M3.10：后台读取章节外链 CSS 文本（最多 8 个），供 [ReaderHtml.bookFontFamilies] 提取书内字体名。
-     * 书籍自带 CSS 由 WebView 经虚拟资源通道加载；这里额外读一次只为拿到声明过的字体族名，
-     * 读不到（外链写法怪异 / 条目缺失）时静默跳过，不影响渲染。
-     */
-    private fun linkedCssTexts(arch: EpubArchive, itemPath: String, html: String): List<String> {
-        if (!html.contains("<link", ignoreCase = true)) return emptyList()
-        val dir = itemPath.substringBeforeLast('/', "")
-        val out = ArrayList<String>()
-        val linkRe = Regex("(?is)<link\\b[^>]*>")
-        val relRe = Regex("(?i)\\brel\\s*=\\s*[\"']?([^\"'>\\s]+)")
-        val hrefRe = Regex("(?i)\\bhref\\s*=\\s*[\"']?([^\"'>\\s]+)")
-        for (tag in linkRe.findAll(html)) {
-            if (out.size >= 8) break
-            val t = tag.value
-            if ("stylesheet" !in (relRe.find(t)?.groupValues?.get(1)?.lowercase() ?: "")) continue
-            val href = hrefRe.find(t)?.groupValues?.get(1) ?: continue
-            if (href.startsWith("http:", true) || href.startsWith("https:", true)) continue
-            val path = ZipPaths.join(dir, ZipPaths.decode(href.substringBefore('#')))
-            val bytes = try {
-                arch.entryBytes(path)
-            } catch (_: Exception) {
-                null
-            } ?: continue
-            out += String(bytes, ZipPaths.detectCharset(bytes))
-        }
-        return out
-    }
+    // 外链 CSS 字体提取已迁移至 ReaderFragments.linkedCssTexts（纯函数，正则预编译）
 
     /** M3.12：前置到书内 CSS `font-family` 声明前的字体栈。
      *  三种模式（custom / serif / sans）走完全相同的机制：前置栈 → 书内字体链。
@@ -1823,7 +2003,8 @@ class BookActivity : Activity() {
                 addCategory(Intent.CATEGORY_OPENABLE)
             }
             startActivityForResult(Intent.createChooser(i, getString(R.string.pick_font_btn)), PICK_FONT)
-        } catch (_: Exception) {
+        } catch (ex: Exception) {
+            Logx.w(TAG, "操作失败，按回退逻辑继续", ex)
             Toast.makeText(this, R.string.pick_font_fail, Toast.LENGTH_SHORT).show()
         }
     }
@@ -1955,15 +2136,16 @@ class BookActivity : Activity() {
         // M2.2/M3：Reasily 式中央弹窗——无标题栏无 ✕（遮罩点击/返回键关闭），
         // 高度=min(内容高, 80% 屏高)：内容不超高时无滚动条，超出才滚动；
         // 弹注内点击标记时同一浮层就地刷新，不堆叠
-        if (fnPanel != null && fnPanelBox != null) {
+        val fb = fnPanelBox
+        if (fnPanel != null && fb != null) {
             // 就地刷新：仅替换内容区
-            if (fnPanelBox!!.childCount > 0) fnPanelBox!!.removeViewAt(0)
-            fnPanelBox!!.addView(
+            if (fb.childCount > 0) fb.removeViewAt(0)
+            fb.addView(
                 sc, ViewGroup.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
                 )
             )
-            fnPanelBox!!.layoutParams.height = ViewGroup.LayoutParams.WRAP_CONTENT // 重置高度等重测
+            fb.layoutParams.height = ViewGroup.LayoutParams.WRAP_CONTENT // 重置高度等重测
         } else {
             val box = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
@@ -2078,7 +2260,8 @@ class BookActivity : Activity() {
                     type = "text/plain"
                     putExtra(Intent.EXTRA_TEXT, selCurText)
                 }
-                try { startActivity(Intent.createChooser(i, getString(R.string.sel_share))) } catch (_: Exception) {}
+                runCatching { startActivity(Intent.createChooser(i, getString(R.string.sel_share))) }
+                    .onFailure { Logx.w(TAG, "分享失败", it) }
                 selPopup?.dismiss()
                 clearSelection()
             }
@@ -2114,7 +2297,8 @@ class BookActivity : Activity() {
                             it.marginEnd = (14 * d).toInt()
                         }
                         setOnClickListener {
-                            try { startActivity(intent) } catch (_: Exception) {
+                            try { startActivity(intent) } catch (ex: Exception) {
+                                Logx.w(TAG, "操作失败，按回退逻辑继续", ex)
                                 Toast.makeText(this@BookActivity, "无法启动应用", Toast.LENGTH_SHORT).show()
                             }
                             selPopup?.dismiss()
@@ -2198,7 +2382,10 @@ class BookActivity : Activity() {
             if (out.size >= 12) return
             val probe = Intent(action)
             if (withType) probe.type = "text/plain"
-            val list = try { pm.queryIntentActivities(probe, 0) } catch (_: Exception) { emptyList() }
+            val list = try { pm.queryIntentActivities(probe, 0) } catch (ex: Exception) {
+                Logx.w(TAG, "查询文字处理应用失败", ex)
+                emptyList()
+            }
             for (ai in list) {
                 val pkg = ai.activityInfo?.packageName ?: continue
                 if (!seen.add(pkg)) continue
@@ -2240,71 +2427,43 @@ class BookActivity : Activity() {
         val path = ZipPaths.normalize(ZipPaths.decode(rel.substringBefore('#')))
         val frag = rel.substringAfter('#', "")
         if (path.isEmpty()) return
-        Thread {
+        onIo {
             val bytes = try {
                 archive?.entryBytes(path)
-            } catch (_: Exception) {
+            } catch (ex: Exception) {
+                Logx.w(TAG, "操作失败，按回退逻辑继续", ex)
                 null
             }
             if (bytes == null) {
                 ui.post { Toast.makeText(this@BookActivity, R.string.footnote_empty, Toast.LENGTH_SHORT).show() }
-                return@Thread
+                return@onIo
             }
             val h = String(bytes, ZipPaths.detectCharset(bytes))
             val head = Regex("(?is)<head[^>]*>(.*?)</head>").find(h)?.groupValues?.get(1)
                 ?.replace(Regex("(?is)<script[\\s\\S]*?</script>"), "") ?: ""
             val dir = path.substringBeforeLast('/', "")
             val content = if (frag.isEmpty()) {
-                extractBodyHtml(h)
+                ReaderFragments.extractBodyHtml(h)
             } else {
                 // 锚点可能经 URL 编码（中文 id 等），原样取不到时按解码值重试一次
-                extractFragHtml(h, frag) ?: run {
+                ReaderFragments.extractFragHtml(h, frag) ?: run {
                     val decoded = try {
                         java.net.URLDecoder.decode(frag, "UTF-8")
-                    } catch (_: Exception) {
+                    } catch (ex: Exception) {
+                        Logx.w(TAG, "操作失败，按回退逻辑继续", ex)
                         frag
                     }
-                    if (decoded != frag) extractFragHtml(h, decoded) else null
+                    if (decoded != frag) ReaderFragments.extractFragHtml(h, decoded) else null
                 }
             }
             ui.post {
                 if (!content.isNullOrBlank()) showFootnoteIn(content, head, dir, path)
                 else Toast.makeText(this@BookActivity, R.string.footnote_empty, Toast.LENGTH_SHORT).show()
             }
-        }.start()
-    }
-
-    /** 无锚点的跨文件链接：取目标文件正文作为弹注内容（仍不跳章） */
-    private fun extractBodyHtml(html: String): String =
-        Regex("(?is)<body[^>]*>(.*?)</body>").find(html)?.groupValues?.get(1)
-            ?.replace(Regex("(?is)<script[\\s\\S]*?</script>"), "")
-            ?: html
-
-    /** 提取 id=frag 的元素（同名标签配平到闭合，上限 200KB 防失控） */
-    private fun extractFragHtml(html: String, frag: String): String? {
-        val m = Regex(
-            "(?is)<([a-zA-Z][a-zA-Z0-9]*)\\b[^>]*\\bid\\s*=\\s*([\"']?)" + Regex.escape(frag) + "\\2[^>]*>"
-        ).find(html) ?: return null
-        val tag = m.groupValues[1].lowercase()
-        if (tag in setOf("img", "br", "hr", "meta", "link", "input", "source")) return m.value
-        val openRe = Regex("(?is)<$tag[\\s>]")
-        val closeRe = Regex("(?is)</$tag\\s*>")
-        var depth = 0
-        var i = m.range.last + 1
-        var end = -1
-        while (i < html.length) {
-            val no = openRe.find(html, i)
-            val nc = closeRe.find(html, i) ?: break
-            if (no != null && no.range.first < nc.range.first) {
-                depth++; i = no.range.last
-            } else {
-                if (depth == 0) { end = nc.range.last; break }
-                depth--; i = nc.range.last
-            }
         }
-        return if (end < 0) html.substring(m.range.first, minOf(html.length, m.range.last + 20000))
-        else html.substring(m.range.first, end)
     }
+
+    // 弹注 HTML 提取已迁移至 ReaderFragments（extractBodyHtml / extractFragHtml）
 
     /** M3：图片查看器（Reasily 式）——全屏黑底 WebView 直读原图：
      *  WebView 内部按瓦片解码渲染，超大扫描图不占整图内存、放大不糊；
@@ -2376,7 +2535,6 @@ class BookActivity : Activity() {
         if (fnPanel != null) closeFnPanel()
         val d = resources.displayMetrics.density
         val pad = (20 * d).toInt()
-        var dlg: AlertDialog? = null // 供边距等控件在应用后关闭面板
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(pad, pad / 2, pad, pad / 2)
@@ -2385,16 +2543,28 @@ class BookActivity : Activity() {
         fun label(res: Int): TextView = TextView(this).apply {
             text = getString(res)
             textSize = 13f
-            setTextColor(Color.parseColor(pal().text))
+            setTextColor(themeText())
             setPadding(0, (14 * d).toInt(), 0, (6 * d).toInt())
         }
 
         fun valueLabel(): TextView = TextView(this).apply {
             textSize = 13f
-            setTextColor(Color.parseColor(pal().text))
+            setTextColor(themeText())
             val lp = LinearLayout.LayoutParams((64 * d).toInt(), LinearLayout.LayoutParams.WRAP_CONTENT)
             layoutParams = lp
             gravity = android.view.Gravity.CENTER
+        }
+
+        /** 0.4.23：滑块颜色跟随主题（系统 Light 主题的蓝色在纸色/夜间面板里很突兀）。 */
+        fun tintSeeks(v: View) {
+            if (v is SeekBar) {
+                val c = android.content.res.ColorStateList.valueOf(themeLink())
+                v.thumbTintList = c
+                v.progressTintList = c
+                v.progressBackgroundTintList =
+                    android.content.res.ColorStateList.valueOf(themeFaded(0x33))
+            }
+            if (v is ViewGroup) for (i in 0 until v.childCount) tintSeeks(v.getChildAt(i))
         }
 
         fun rowButton(textRes: Int, selected: Boolean): Button =
@@ -2406,12 +2576,16 @@ class BookActivity : Activity() {
                 minLines = 1
                 setTypeface(null, if (selected) Typeface.BOLD else Typeface.NORMAL)
                 alpha = if (selected) 1f else 0.55f
+                setTextColor(if (selected) themeLink() else themeFaded(0xCC))
+                background = null // 去掉系统 Button 的浅色实心底，跟随面板主题
+                stateListAnimator = null
                 layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
             }
 
         fun restyle(b: Button, selected: Boolean) {
             b.setTypeface(null, if (selected) Typeface.BOLD else Typeface.NORMAL)
             b.alpha = if (selected) 1f else 0.55f
+            b.setTextColor(if (selected) themeLink() else themeFaded(0xCC))
         }
 
         // M3：全部设置先存草稿，点「完成」才统一提交生效（主题/排版/边距/注释字号）
@@ -2558,64 +2732,67 @@ class BookActivity : Activity() {
 
         // 自定义字体（M2.2：选择 TTF/OTF，导入后立即应用——独立流程不经「完成」）
         box.addView(label(R.string.set_custom_font))
-        val fontBtn = Button(this).apply {
-            setAllCaps(false)
-            textSize = 14f
-            text = if (fontFam == "custom") getString(R.string.font_in_use) else getString(R.string.pick_font_btn)
-        }
+        val fontBtn = themeFlatButton(
+            if (fontFam == "custom") getString(R.string.font_in_use) else getString(R.string.pick_font_btn)
+        ).apply { textSize = 14f }
         fontBtn.setOnClickListener {
-            dlg?.dismiss()
+            closeMenuOverlay()
             pickFont()
         }
         box.addView(fontBtn)
 
-        val settingsDlg = AlertDialog.Builder(this, dialogTheme())
-            .setTitle(R.string.settings_title)
-            .setView(box)
-            .setPositiveButton(R.string.action_done) { _, _ ->
-                // M3：统一提交
-                val oldFs = fontPx; val oldLh = lineH; val oldFam = fontFam
-                val oldML = mL; val oldMR = mR; val oldMT = mT; val oldMB = mB
-                val themeChanged = dTheme != themeId
-                themeId = dTheme
-                ReaderPrefs.setTheme(this, themeId)
-                fontPx = dFs
-                lineH = dLh
-                fontFam = dFam
-                persistTypography()
-                val marginChanged = mSeekL?.progress != oldML || mSeekR?.progress != oldMR ||
-                    mSeekT?.progress != oldMT || mSeekB?.progress != oldMB
-                val typoChanged = dFs != oldFs || dLh != oldLh || dFam != oldFam
-                if (marginChanged) {
-                    applyMargins(
-                        mSeekL?.progress ?: oldML, mSeekR?.progress ?: oldMR,
-                        mSeekT?.progress ?: oldMT, mSeekB?.progress ?: oldMB
-                    ) // 内部已按锚点重排
-                } else if (dFam != oldFam) {
-                    // M3.12：字族变化必须重载章节——书内 CSS 的字体链前置发生在章节加载与
-                    // 资源拦截阶段，热更新（__setFont）改不到已加载的 CSS，会残留旧字体
-                    val a = when {
-                        curAnchor >= 0 -> Anchor.Elem(curAnchor, curPage)
-                        curTotal > 1 -> Anchor.Frac(curPage.toDouble() / (curTotal - 1))
-                        else -> Anchor.First
-                    }
-                    loadSpine(spineIndex, a)
-                } else if (typoChanged) {
-                    relayoutPreserve()
+        fun commit() {
+            // M3：统一提交
+            val oldFs = fontPx; val oldLh = lineH; val oldFam = fontFam
+            val oldML = mL; val oldMR = mR; val oldMT = mT; val oldMB = mB
+            val themeChanged = dTheme != themeId
+            themeId = dTheme
+            ReaderPrefs.setTheme(this, themeId)
+            fontPx = dFs
+            lineH = dLh
+            fontFam = dFam
+            persistTypography()
+            val marginChanged = mSeekL?.progress != oldML || mSeekR?.progress != oldMR ||
+                mSeekT?.progress != oldMT || mSeekB?.progress != oldMB
+            val typoChanged = dFs != oldFs || dLh != oldLh || dFam != oldFam
+            if (marginChanged) {
+                applyMargins(
+                    mSeekL?.progress ?: oldML, mSeekR?.progress ?: oldMR,
+                    mSeekT?.progress ?: oldMT, mSeekB?.progress ?: oldMB
+                ) // 内部已按锚点重排
+            } else if (dFam != oldFam) {
+                // M3.12：字族变化必须重载章节——书内 CSS 的字体链前置发生在章节加载与
+                // 资源拦截阶段，热更新（__setFont）改不到已加载的 CSS，会残留旧字体
+                val a = when {
+                    curAnchor >= 0 -> Anchor.Elem(curAnchor, curPage)
+                    curTotal > 1 -> Anchor.Frac(curPage.toDouble() / (curTotal - 1))
+                    else -> Anchor.First
                 }
-                ReaderPrefs.setFnFont(this, dFn) // 弹注下次打开生效
-                if (themeChanged) {
-                    applyThemeChrome()
-                    val p = pal()
-                    runJs(
-                        "try{window.__setTheme('${p.bg}','${p.text}','${p.link}'," +
-                            "${themeId == ReaderPrefs.THEME_NIGHT});}catch(e){}"
-                    )
-                }
+                loadSpine(spineIndex, a)
+            } else if (typoChanged) {
+                relayoutPreserve()
             }
-            .create()
-        dlg = settingsDlg
-        settingsDlg.show()
+            ReaderPrefs.setFnFont(this, dFn) // 弹注下次打开生效
+            if (themeChanged) {
+                applyThemeChrome()
+                val p = pal()
+                runJs(
+                    "try{window.__setTheme('${p.bg}','${p.text}','${p.link}'," +
+                        "${themeId == ReaderPrefs.THEME_NIGHT});}catch(e){}"
+                )
+            }
+        }
+        tintSeeks(box)
+        // 0.4.23：统一浮层 80vw×80vh 居中；设置项较多，用 ScrollView 保证小屏可完整操作
+        val sc = ScrollView(this).apply {
+            isVerticalScrollBarEnabled = false
+            addView(box, ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        }
+        showMenuOverlay(
+            getString(R.string.settings_title), sc,
+            listOf(getString(R.string.action_done) to { commit(); closeMenuOverlay() })
+        )
     }
 
 
@@ -2637,16 +2814,14 @@ class BookActivity : Activity() {
         lastSavedSpine = spineIndex
         lastSavedPage = curPage
         lastSavedTotal = curTotal
-        val book = epub!!
+        val book = epub ?: return
         val total = book.spine.size.coerceAtLeast(1)
         val pct = ((spineIndex + (curPage + 1.0) / curTotal) / total * 100).coerceIn(0.0, 100.0)
         val row = ProgressRow(spineIndex, curPage, curTotal, curAnchor, pct)
-        Thread {
-            try {
-                (application as App).db.saveProgress(bookId, row)
-            } catch (_: Exception) {
-            }
-        }.start()
+        onIo {
+            runCatching { (application as App).db.saveProgress(bookId, row) }
+                .onFailure { Logx.w(TAG, "进度保存失败", it) }
+        }
     }
 
     override fun onPause() {
@@ -2666,6 +2841,7 @@ class BookActivity : Activity() {
     // ————— 资源拦截（虚拟资源通道，M0 同构） —————
 
     private fun intercept(url: Uri): WebResourceResponse? {
+        if (destroyed) return null
         // M2.2：自定义字体经拦截通道提供（@font-face src 指向 reader.local，同源可加载）
         if (url.path == "/font/custom.ttf") {
             val f = File(ReaderPrefs.fontPath(this))
@@ -2676,37 +2852,70 @@ class BookActivity : Activity() {
         val path = url.path ?: return null
         if (!path.startsWith("/book/$bookId/")) return null
         val rel = ZipPaths.normalize(ZipPaths.decode(path.removePrefix("/book/$bookId/")))
-        val bytes = archive?.entryBytes(rel) ?: return null
+        val arch = archive ?: return null // 已关闭（onDestroy）→ 不再接触 ZipFile
         val mime = ZipPaths.mimeTypeFor(rel)
-        // M3.12：所有字族模式统一——把当前字体的前置栈插到书内 CSS 的 font-family 链前，
-        // 缺字时按书内 CSS 原本指定的字体逐字符回退（「回退到 css」）。
+        // M3.12：外链 CSS 前置当前字体栈（缺字按书内 CSS 逐字符回退）。
+        // 0.4.22：改写结果按「路径 + 前置栈」缓存，同一 CSS 被反复请求时不再重复解压与改写。
         if (mime == "text/css") {
             val stack = fontPrependStack()
             if (stack.isNotEmpty()) {
-                val patched = ReaderHtml.prependFontFamily(
-                    String(bytes, ZipPaths.detectCharset(bytes)), stack
-                )
-                val out = patched.toByteArray(Charsets.UTF_8)
+                val key = "$rel|$stack"
+                val out = cssCache[key] ?: run {
+                    val bytes = arch.entryBytes(rel) ?: return null
+                    val patched = ReaderHtml.prependFontFamily(
+                        String(bytes, ZipPaths.detectCharset(bytes)), stack
+                    ).toByteArray(Charsets.UTF_8)
+                    cssCache[key] = patched
+                    patched
+                }
                 return WebResourceResponse(mime, "utf-8", ByteArrayInputStream(out))
             }
         }
         val encoding =
             if (mime.startsWith("text/") || mime.contains("css") || mime.contains("xhtml") || mime.contains("xml")) "utf-8"
             else null
-        return WebResourceResponse(mime, encoding, ByteArrayInputStream(bytes))
+        // 0.4.22：图片 / 字体等二进制资源走 InputStream 流式交给 WebView，
+        // 不再 readBytes 整块进内存；小资源由 EpubArchive 的 LRU 直接供流。
+        val stream = arch.entryStream(rel) ?: return null
+        return WebResourceResponse(mime, encoding, stream)
     }
 
     override fun onDestroy() {
-        super.onDestroy()
+        destroyed = true
+        // ① 掐断在途扫描与所有 UI 回调，避免回调打到已销毁对象
         searchCancelled = true
         searchSession++ // 使所有在途回报过期
         searchPool?.shutdownNow()
         searchPool = null
-        runCatching { archive?.close() }
-        archive = null
+        ui.removeCallbacksAndMessages(null)
+        // ② 移除全部浮层（搜索浮层顺带收起输入法并打断扫描）
+        closeMenuOverlay()
+        closeFnPanel()
         closeImgOverlay()
-        fnWv?.let { runCatching { it.destroy() } }
+        selPopup?.dismiss()
+        selPopup = null
+        // ③ 主 WebView：停加载 → 摘 JS 桥 → 清空页面 → 脱离视图树 → destroy
+        if (::webView.isInitialized) {
+            webView.stopLoading()
+            webView.removeJavascriptInterface("ReaderBridge")
+            webView.loadUrl("about:blank")
+            (webView.parent as? ViewGroup)?.removeView(webView)
+            webView.destroy()
+        }
+        fnWv?.let { wv ->
+            (wv.parent as? ViewGroup)?.removeView(wv)
+            runCatching { wv.destroy() }.onFailure { Logx.w(TAG, "销毁弹注 WebView 失败", it) }
+        }
         fnWv = null
+        // ④ 线程池与 ZipFile：任务开头检查 destroyed 后自行退出；
+        //    EpubArchive 内部有锁与 closed 标志，杜绝并发关闭异常。
+        io.shutdownNow()
+        runCatching { archive?.close() }.onFailure { Logx.w(TAG, "关闭 EPUB 归档失败", it) }
+        archive = null
+        epub = null
+        cssCache.clear()
+        pendingSrchHtml.clear()
+        super.onDestroy()
     }
 
     /** M2.2：字体选择结果——Reasily 式直接引用原文件（不复制），并整章重载使 @font-face 立即生效 */

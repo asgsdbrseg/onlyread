@@ -2,6 +2,7 @@ package com.onlyread.app.reader
 
 import android.content.Context
 import android.os.Environment
+import com.onlyread.app.util.Logx
 import java.io.File
 
 /**
@@ -21,6 +22,8 @@ import java.io.File
  * 用户修改文件后需完全退出并重新打开 App 才会生效。
  */
 object VariantsStore {
+
+    private const val TAG = "VariantsStore"
 
     private const val DIR_NAME = "onlyread"
     private const val FILE_NAME = "variants.json"
@@ -55,7 +58,8 @@ object VariantsStore {
     /** assets 里与仓库根目录 variants.json 完全一致的模板内容。 */
     private fun templateJson(context: Context): String = try {
         context.assets.open(ASSET_NAME).bufferedReader(Charsets.UTF_8).use { it.readText() }
-    } catch (_: Exception) {
+    } catch (e: Exception) {
+        Logx.w(TAG, "读取内置异体字模板失败", e)
         "{}"
     }
 
@@ -66,8 +70,9 @@ object VariantsStore {
         try {
             f.parentFile?.mkdirs()
             f.writeText(templateJson(context), Charsets.UTF_8)
-        } catch (_: Exception) {
-            // 无写权限时静默：后续 loadOnStartup 使用 assets 模板内容
+        } catch (e: Exception) {
+            // 无写权限时不阻断启动：后续 loadOnStartup 使用 assets 模板内容
+            Logx.w(TAG, "写出外部异体字表失败", e)
         }
     }
 
@@ -100,7 +105,8 @@ object VariantsStore {
             lastError = "variants.json 格式错误，已改用内置字表：${e.message}"
             try {
                 Variants.parse(template)
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                Logx.w(TAG, "内置异体字模板也解析失败", e)
                 emptyMap()
             }
         }

@@ -1,8 +1,10 @@
 package com.onlyread.app.epub
 
+import com.onlyread.app.util.Logx
 import com.onlyread.app.util.ZipPaths
 import org.xmlpull.v1.XmlPullParser
 import org.xmlpull.v1.XmlPullParserFactory
+import java.io.ByteArrayInputStream
 import java.io.Closeable
 import java.io.File
 import java.io.InputStream
@@ -12,12 +14,41 @@ import java.util.zip.ZipFile
 /**
  * EPUB 归档访问：ZipFile 封装 + container.xml/OPF/目录(NAV/NCX) 解析。
  * 生命周期 = 阅读会话；保持打开状态以支撑 BookActivity 的请求拦截。
+ *
+ * 0.4.22 修正：
+ * - 所有 ZipFile 访问与关闭收在同一把锁内，加 [closed] 标志。此前 onDestroy 关闭
+ *   ZipFile 的同时，资源拦截/后台章节加载线程仍可能正在读取，会抛
+ *   `IllegalStateException: zip file closed` 甚至导致 WebView 渲染异常；
+ * - 新增 [entryStream]：图片/字体等二进制资源经 WebResourceResponse 直接流式交给
+ *   WebView，不再整块读进 byte[]；小文本资源走带容量上限的 LRU 缓存，避免同一
+ *   CSS/章节被反复解压；
+ * - 所有 XML 解析用的 InputStream 明确关闭（或改用内存流），消除泄漏；
+ * - 空 catch 全部改为带日志的明确回退，消除 `!!`。
  */
 class EpubArchive(file: File) : Closeable {
 
+    companion object {
+        private const val TAG = "EpubArchive"
+        private const val MAX_CACHE_BYTES = 4L * 1024 * 1024
+        private const val MAX_SINGLE_ENTRY = 512 * 1024
+        private val NAV_NAME_RE = Regex("(?i)(toc|nav|contents|catalog)")
+        private val NAV_CONTENT_RE = Regex(
+            "(?i)epub:type\\s*=\\s*[\"']toc[\"']" +
+                "|<nav[^>]*id\\s*=\\s*[\"'](toc|nav)[\"']" +
+                "|<nav[^>]*class\\s*=\\s*[\"'][^\"']*(toc|nav)"
+        )
+        private val WS_SPLIT_RE = Regex("\\s+")
+    }
+
     private val zip = ZipFile(file)
 
-    /** 小写路径 → 条目 索引，兜底大小写不一致的畸形书 */
+    /** 保护 ZipFile 的生命周期与缓存；close 与所有读取都在锁内，杜绝并发关闭。 */
+    private val lock = Any()
+
+    @Volatile
+    private var closed = false
+
+    /** 小写路径 → 条目索引，兜底大小写不一致的畸形书（仅在 [lock] 内惰性初始化）。 */
     private val lowerIndex: Map<String, ZipEntry> by lazy {
         val map = HashMap<String, ZipEntry>()
         val en = zip.entries()
@@ -28,41 +59,117 @@ class EpubArchive(file: File) : Closeable {
         map
     }
 
+    /** 小资源 LRU（access-order），容量按字节计，避免大书把内存吃满。 */
+    private val bytesCache = LinkedHashMap<String, ByteArray>(16, 0.75f, true)
+    private var cacheBytes = 0L
+
     override fun close() {
-        zip.close()
+        synchronized(lock) {
+            if (closed) return
+            closed = true
+            bytesCache.clear()
+            cacheBytes = 0
+            try {
+                zip.close()
+            } catch (e: Exception) {
+                Logx.w(TAG, "关闭 ZipFile 失败", e)
+            }
+        }
     }
 
+    /** 文本资源（HTML/CSS/NCX/OPF）→ 字节数组；命中缓存则不重复解压。 */
     fun entryBytes(entryPath: String): ByteArray? {
-        val entry = findEntry(ZipPaths.normalize(entryPath)) ?: return null
-        return zip.getInputStream(entry).use { it.readBytes() }
+        val key = ZipPaths.normalize(entryPath)
+        return synchronized(lock) {
+            if (closed) return@synchronized null
+            val e = findEntryLocked(key) ?: return@synchronized null
+            bytesLocked(key, e)
+        }
     }
 
-    private fun findEntry(path: String): ZipEntry? {
+    /**
+     * 二进制资源 → InputStream，交给 WebResourceResponse 流式消费，避免整块读入内存。
+     * 小条目（≤512KB）直接返回缓存字节的内存流，兼顾「重复请求不重复解压」。
+     * 调用方负责关闭返回的流。
+     */
+    fun entryStream(entryPath: String): InputStream? {
+        val key = ZipPaths.normalize(entryPath)
+        return synchronized(lock) {
+            if (closed) return@synchronized null
+            val e = findEntryLocked(key) ?: return@synchronized null
+            val size = e.size
+            if (size >= 0 && size <= MAX_SINGLE_ENTRY) {
+                val b = bytesLocked(key, e) ?: return@synchronized null
+                return@synchronized ByteArrayInputStream(b)
+            }
+            try {
+                zip.getInputStream(e)
+            } catch (ex: Exception) {
+                Logx.w(TAG, "打开条目流失败: $key", ex)
+                null
+            }
+        }
+    }
+
+    /** 调用方必须已持有 [lock]。 */
+    private fun findEntryLocked(path: String): ZipEntry? {
         zip.getEntry(path)?.let { return it }
         return lowerIndex[path.lowercase()]
     }
 
-    fun opfPath(): String? {
-        val container = findEntry("META-INF/container.xml") ?: return null
-        val parser = newParser(zip.getInputStream(container)) ?: return null
-        var result: String? = null
-        while (moveTo(parser)) {
-            if (parser.eventType == XmlPullParser.START_TAG && localName(parser) == "rootfile") {
-                val full = attr(parser, "full-path")
-                if (!full.isNullOrBlank()) {
-                    result = ZipPaths.decode(full)
-                    break
-                }
+    /** 调用方必须已持有 [lock]。 */
+    private fun bytesLocked(key: String, e: ZipEntry): ByteArray? {
+        bytesCache[key]?.let { return it }
+        val data = try {
+            zip.getInputStream(e).use { it.readBytes() }
+        } catch (ex: Exception) {
+            Logx.w(TAG, "读取条目失败: $key", ex)
+            return null
+        }
+        if (data.size <= MAX_SINGLE_ENTRY) {
+            bytesCache[key] = data
+            cacheBytes += data.size
+            while (cacheBytes > MAX_CACHE_BYTES && bytesCache.isNotEmpty()) {
+                val it = bytesCache.entries.iterator()
+                val oldest = it.next()
+                cacheBytes -= oldest.value.size
+                it.remove()
             }
         }
-        return result
+        return data
+    }
+
+    fun opfPath(): String? {
+        // container.xml 走缓存读取；用 ByteArrayInputStream 解析，流在 use 中关闭。
+        val container = entryBytes("META-INF/container.xml") ?: return null
+        return ByteArrayInputStream(container).use { ins ->
+            val parser = newParser(ins) ?: return null
+            var result: String? = null
+            while (moveTo(parser)) {
+                if (parser.eventType == XmlPullParser.START_TAG && localName(parser) == "rootfile") {
+                    val full = attr(parser, "full-path")
+                    if (!full.isNullOrBlank()) {
+                        result = ZipPaths.decode(full)
+                        break
+                    }
+                }
+            }
+            result
+        }
     }
 
     fun parseBook(): EpubBook? {
         val opf = opfPath() ?: return null
         val opfDir = if (opf.contains('/')) opf.substringBeforeLast('/') else ""
-        val parser = newParser(findEntry(opf)?.let { zip.getInputStream(it) }) ?: return null
+        val opfBytes = entryBytes(opf) ?: return null
+        return ByteArrayInputStream(opfBytes).use { ins ->
+            val parser = newParser(ins) ?: return null
+            parseOpf(parser, opfDir)
+        }
+    }
 
+    /** OPF 元数据/manifest/spine 解析（输入流由调用方 use 关闭）。 */
+    private fun parseOpf(parser: XmlPullParser, opfDir: String): EpubBook? {
         var title = ""
         var author: String? = null
         var language: String? = null
@@ -138,43 +245,34 @@ class EpubArchive(file: File) : Closeable {
                 }
 
         // M3.5：Reasily 式——全部目录页集合。
-        // 1) manifest properties 含 "nav" 的所有 XHTML 文件（EPUB3 规范标记，可能不止一个：
-        //    toc / landmarks / page-list 常被制作成多个 nav）；
-        // 2) 启发式兜底：properties 缺失的不规范书——文件名含 toc/nav/contents/catalog
-        //    且内容含 nav 语义标记（epub:type="toc" / <nav id="toc"> 等）才认定，避免误伤正文。
         val navMarked = manifest.values.filter {
             (it.properties?.split(' ')?.contains("nav") == true) &&
                 (it.mediaType.contains("xhtml") || it.mediaType == "text/html")
         }
         val navPath = navMarked.firstOrNull()?.let { ZipPaths.join(opfDir, ZipPaths.decode(it.href)) }
-        val navPaths = LinkedHashSet<String>().apply { navMarked.forEach { add(ZipPaths.join(opfDir, ZipPaths.decode(it.href))) } }
+        val navPaths = LinkedHashSet<String>().apply {
+            navMarked.forEach { add(ZipPaths.join(opfDir, ZipPaths.decode(it.href))) }
+        }
         if (navPaths.isEmpty()) {
             // 启发式：仅在文件名命中时才读内容确认（每书至多几次 8KB 读取）
-            val nameRe = Regex("(?i)(toc|nav|contents|catalog)")
-            val navContentRe = Regex(
-                "(?i)epub:type\\s*=\\s*[\"']toc[\"']" +
-                    "|<nav[^>]*id\\s*=\\s*[\"'](toc|nav)[\"']" +
-                    "|<nav[^>]*class\\s*=\\s*[\"'][^\"']*(toc|nav)"
-            )
             spine.forEach { s ->
                 val name = s.href.substringAfterLast('/')
-                if (nameRe.containsMatchIn(name) &&
+                if (NAV_NAME_RE.containsMatchIn(name) &&
                     (name.endsWith(".xhtml", true) || name.endsWith(".html", true) || name.endsWith(".htm", true)) &&
                     s.path !in navPaths
                 ) {
-                    val confirmed = findEntry(s.path)?.let { e ->
+                    val confirmed = entryStream(s.path)?.use { ins ->
                         try {
-                            zip.getInputStream(e).use { ins ->
-                                val buf = ByteArray(8192)
-                                var n = 0
-                                while (n < buf.size) { // read 可能分次返回，读满/读完为止
-                                    val r = ins.read(buf, n, buf.size - n)
-                                    if (r <= 0) break
-                                    n += r
-                                }
-                                if (n > 0) navContentRe.containsMatchIn(String(buf, 0, n, Charsets.UTF_8)) else false
+                            val buf = ByteArray(8192)
+                            var n = 0
+                            while (n < buf.size) { // read 可能分次返回，读满/读完为止
+                                val r = ins.read(buf, n, buf.size - n)
+                                if (r <= 0) break
+                                n += r
                             }
-                        } catch (_: Exception) {
+                            if (n > 0) NAV_CONTENT_RE.containsMatchIn(String(buf, 0, n, Charsets.UTF_8)) else false
+                        } catch (e: Exception) {
+                            Logx.w(TAG, "目录页启发式探测失败: ${s.path}", e)
                             false
                         }
                     } ?: false
@@ -184,8 +282,6 @@ class EpubArchive(file: File) : Closeable {
         }
         // M3.6：解析期即从 spine 剔除全部目录页（Reasily 式）——目录页永不进入正文流；
         // ⚠️ 必须在 parseToc 之前剔除，使 TOC 条目的 spineIndex 与剔除后的 spine 对齐
-        // （目录跳转/进度/搜索的章序号均为剔除后体系）。navPath/navPaths 仍保留，
-        // loadSpine 的运行时跳过逻辑作为防御性兜底。
         val spineReading = spine.filter { it.path !in navPaths }
         val toc = parseToc(manifest, opfDir, spineReading)
 
@@ -196,7 +292,7 @@ class EpubArchive(file: File) : Closeable {
             publisher = publisher,
             opfDir = opfDir,
             coverPath = cover?.let { ZipPaths.join(opfDir, ZipPaths.decode(it.href)) },
-            spine = spineReading, // M3.6：已剔除目录页的阅读流 spine
+            spine = spineReading,
             toc = toc,
             navPath = navPath,
             navPaths = navPaths
@@ -217,12 +313,12 @@ class EpubArchive(file: File) : Closeable {
             navItem != null -> {
                 val navPath = ZipPaths.join(opfDir, ZipPaths.decode(navItem.href))
                 val dir = navPath.substringBeforeLast('/', "")
-                parseNav(findEntry(navPath)?.let { zip.getInputStream(it) }, dir)
+                entryBytes(navPath)?.let { parseNav(ByteArrayInputStream(it), dir) } ?: emptyList()
             }
             ncxItem != null -> {
                 val ncxPath = ZipPaths.join(opfDir, ZipPaths.decode(ncxItem.href))
                 val dir = ncxPath.substringBeforeLast('/', "")
-                parseNcx(findEntry(ncxPath)?.let { zip.getInputStream(it) }, dir)
+                entryBytes(ncxPath)?.let { parseNcx(ByteArrayInputStream(it), dir) } ?: emptyList()
             }
             else -> emptyList()
         }
@@ -237,115 +333,128 @@ class EpubArchive(file: File) : Closeable {
 
     private data class RawToc(val title: String, val path: String, val frag: String?, val level: Int, val baseDir: String)
 
-    /** EPUB2 NCX navMap：navPoint 栈式解析 */
+    /** EPUB2 NCX navMap：navPoint 栈式解析（流由 use 关闭） */
     private fun parseNcx(input: InputStream?, baseDir: String): List<RawToc> {
-        val parser = newParser(input) ?: return emptyList()
-        val out = ArrayList<RawToc>()
-        val stack = ArrayDeque<Node>()
-        var inNavLabel = false
-        try {
-            while (moveTo(parser)) {
-                when (parser.eventType) {
-                    XmlPullParser.START_TAG -> when (localName(parser)) {
-                        "navpoint" -> stack.addLast(Node())
-                        "navlabel" -> inNavLabel = true
-                        "text" -> if (inNavLabel && stack.isNotEmpty() && stack.last().title == null) {
-                            val t = readText(parser)
-                            if (stack.last().title == null) stack.last().title = t
-                        }
-                        "content" -> if (stack.isNotEmpty()) {
-                            val src = attr(parser, "src")
-                            if (src != null && stack.last().src == null) {
-                                stack.last().src = ZipPaths.decode(src.substringBefore('#'))
-                                stack.last().frag = src.substringAfter('#', "").ifEmpty { null }
+        if (input == null) return emptyList()
+        return input.use { ins ->
+            val parser = newParser(ins) ?: return@use emptyList()
+            val out = ArrayList<RawToc>()
+            val stack = ArrayDeque<Node>()
+            var inNavLabel = false
+            try {
+                while (moveTo(parser)) {
+                    when (parser.eventType) {
+                        XmlPullParser.START_TAG -> when (localName(parser)) {
+                            "navpoint" -> stack.addLast(Node())
+                            "navlabel" -> inNavLabel = true
+                            "text" -> if (inNavLabel && stack.isNotEmpty() && stack.last().title == null) {
+                                val t = readText(parser)
+                                if (stack.last().title == null) stack.last().title = t
+                            }
+                            "content" -> if (stack.isNotEmpty()) {
+                                val src = attr(parser, "src")
+                                if (src != null && stack.last().src == null) {
+                                    stack.last().src = ZipPaths.decode(src.substringBefore('#'))
+                                    stack.last().frag = src.substringAfter('#', "").ifEmpty { null }
+                                }
                             }
                         }
-                    }
-                    XmlPullParser.END_TAG -> when (localName(parser)) {
-                        "navlabel" -> inNavLabel = false
-                        "navpoint" -> {
-                            if (stack.isNotEmpty()) {
-                                val n = stack.removeLast()
-                                val level = stack.size.coerceAtMost(5)
-                                if (n.title != null && n.src != null && out.size < 3000) {
-                                    out.add(RawToc(n.title!!, n.src!!, n.frag, level, baseDir))
+                        XmlPullParser.END_TAG -> when (localName(parser)) {
+                            "navlabel" -> inNavLabel = false
+                            "navpoint" -> {
+                                if (stack.isNotEmpty()) {
+                                    val n = stack.removeLast()
+                                    val level = stack.size.coerceAtMost(5)
+                                    val t = n.title
+                                    val s = n.src
+                                    if (t != null && s != null && out.size < 3000) {
+                                        out.add(RawToc(t, s, n.frag, level, baseDir))
+                                    }
                                 }
                             }
                         }
                     }
                 }
+            } catch (e: Exception) {
+                // 畸形 NCX：返回已解析部分，但留下可排查痕迹
+                Logx.w(TAG, "NCX 解析中断，使用已解析部分", e)
             }
-        } catch (_: Exception) {
-            // 畸形 NCX：返回已解析部分
+            out
         }
-        return out
     }
 
-    /** EPUB3 NAV：epub:type="toc" 的 nav 下的 ol/li/a（嵌套 ol 计层级） */
+    /** EPUB3 NAV：epub:type="toc" 的 nav 下的 ol/li/a（嵌套 ol 计层级，流由 use 关闭） */
     private fun parseNav(input: InputStream?, baseDir: String): List<RawToc> {
-        val parser = newParser(input) ?: return emptyList()
-        val out = ArrayList<RawToc>()
-        try {
-            var inTocNav = false
-            var sawTypedNav = false
-            var inAnyNav = false
-            var navDepth = 0
-            var olDepth = 0
-            var pendingHref: String? = null
-            var pendingLevel = 0
+        if (input == null) return emptyList()
+        return input.use { ins ->
+            val parser = newParser(ins) ?: return@use emptyList()
+            val out = ArrayList<RawToc>()
+            try {
+                var inTocNav = false
+                var sawTypedNav = false
+                var inAnyNav = false
+                var navDepth = 0
+                var olDepth = 0
+                var pendingHref: String? = null
+                var pendingLevel = 0
 
-            while (moveTo(parser)) {
-                when (parser.eventType) {
-                    XmlPullParser.START_TAG -> when (localName(parser)) {
-                        "nav" -> {
-                            navDepth++
-                            val type = attr(parser, "epub:type") ?: attr(parser, "type")
-                            if (!inTocNav) {
-                                if (type?.split(Regex("\\s+"))?.contains("toc") == true) {
-                                    inTocNav = true
-                                    sawTypedNav = true
-                                    inAnyNav = true
-                                    olDepth = 0
-                                } else if (navDepth == 1) {
-                                    // 记住第一个 nav 作为兜底
-                                    inAnyNav = true
-                                    olDepth = 0
+                while (moveTo(parser)) {
+                    when (parser.eventType) {
+                        XmlPullParser.START_TAG -> when (localName(parser)) {
+                            "nav" -> {
+                                navDepth++
+                                val type = attr(parser, "epub:type") ?: attr(parser, "type")
+                                if (!inTocNav) {
+                                    if (type?.split(WS_SPLIT_RE)?.contains("toc") == true) {
+                                        inTocNav = true
+                                        sawTypedNav = true
+                                        inAnyNav = true
+                                        olDepth = 0
+                                    } else if (navDepth == 1) {
+                                        // 记住第一个 nav 作为兜底
+                                        inAnyNav = true
+                                        olDepth = 0
+                                    }
+                                }
+                            }
+                            "ol" -> if (inAnyNav && (inTocNav || !sawTypedNav)) olDepth++
+                            "a" -> if (inAnyNav && (inTocNav || !sawTypedNav) && olDepth > 0) {
+                                val href = attr(parser, "href")
+                                if (href != null) {
+                                    pendingHref = href
+                                    pendingLevel = (olDepth - 1).coerceAtMost(5)
                                 }
                             }
                         }
-                        "ol" -> if (inAnyNav && (inTocNav || !sawTypedNav)) olDepth++
-                        "a" -> if (inAnyNav && (inTocNav || !sawTypedNav) && olDepth > 0) {
-                            val href = attr(parser, "href")
+                        XmlPullParser.TEXT -> {
+                            val href = pendingHref
                             if (href != null) {
-                                pendingHref = href
-                                pendingLevel = (olDepth - 1).coerceAtMost(5)
+                                val t = parser.text?.trim().orEmpty()
+                                if (t.isNotEmpty() && out.size < 3000) {
+                                    val path = ZipPaths.decode(href.substringBefore('#'))
+                                    val frag = href.substringAfter('#', "").ifEmpty { null }
+                                    out.add(RawToc(t, path, frag, pendingLevel, baseDir))
+                                    pendingHref = null
+                                }
                             }
                         }
-                    }
-                    XmlPullParser.TEXT -> if (pendingHref != null) {
-                        val t = parser.text?.trim().orEmpty()
-                        if (t.isNotEmpty() && out.size < 3000) {
-                            val path = ZipPaths.decode(pendingHref!!.substringBefore('#'))
-                            val frag = pendingHref!!.substringAfter('#', "").ifEmpty { null }
-                            out.add(RawToc(t, path, frag, pendingLevel, baseDir))
-                            pendingHref = null
+                        XmlPullParser.END_TAG -> when (localName(parser)) {
+                            "ol" -> if (inAnyNav) olDepth--
+                            "nav" -> {
+                                if (inTocNav && navDepth == 1) inTocNav = false
+                                navDepth--
+                                if (navDepth == 0) inAnyNav = false
+                            }
+                            "a" -> pendingHref = null
                         }
-                    }
-                    XmlPullParser.END_TAG -> when (localName(parser)) {
-                        "ol" -> if (inAnyNav) olDepth--
-                        "nav" -> {
-                            if (inTocNav && navDepth == 1) inTocNav = false
-                            navDepth--
-                            if (navDepth == 0) inAnyNav = false
-                        }
-                        "a" -> pendingHref = null
                     }
                 }
+            } catch (e: Exception) {
+                // 畸形 NAV：返回已解析部分，但留下可排查痕迹
+                Logx.w(TAG, "NAV 解析中断，使用已解析部分", e)
             }
-        } catch (_: Exception) {
-            // 畸形 NAV：返回已解析部分
+            out
         }
-        return out
     }
 
     private class Node {
@@ -366,40 +475,42 @@ class EpubArchive(file: File) : Closeable {
                     XmlPullParser.END_DOCUMENT -> break
                 }
             }
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            // 畸形嵌套：返回已收集文本
+            Logx.w(TAG, "读取 navLabel 文本中断", e)
         }
         return sb.toString().trim()
     }
 
-    companion object {
-        private fun newParser(input: InputStream?): XmlPullParser? {
-            if (input == null) return null
-            return try {
-                val p = XmlPullParserFactory.newInstance().newPullParser()
-                p.setInput(input, null)
-                p
-            } catch (_: Exception) {
-                null
-            }
+    private fun newParser(input: InputStream?): XmlPullParser? {
+        if (input == null) return null
+        return try {
+            val p = XmlPullParserFactory.newInstance().newPullParser()
+            p.setInput(input, null)
+            p
+        } catch (e: Exception) {
+            Logx.w(TAG, "XML 解析器初始化失败", e)
+            null
+        }
+    }
+
+    private fun moveTo(parser: XmlPullParser): Boolean =
+        try {
+            parser.next() != XmlPullParser.END_DOCUMENT
+        } catch (e: Exception) {
+            Logx.w(TAG, "XML 解析中断，按文档结束处理", e)
+            false
         }
 
-        private fun moveTo(parser: XmlPullParser): Boolean =
-            try {
-                parser.next() != XmlPullParser.END_DOCUMENT
-            } catch (_: Exception) {
-                false
-            }
+    private fun localName(parser: XmlPullParser): String =
+        parser.name?.substringAfter(':')?.lowercase() ?: ""
 
-        private fun localName(parser: XmlPullParser): String =
-            parser.name?.substringAfter(':')?.lowercase() ?: ""
-
-        private fun attr(parser: XmlPullParser, name: String): String? {
-            for (i in 0 until parser.attributeCount) {
-                if (parser.getAttributeName(i).equals(name, ignoreCase = true)) {
-                    return parser.getAttributeValue(i)
-                }
+    private fun attr(parser: XmlPullParser, name: String): String? {
+        for (i in 0 until parser.attributeCount) {
+            if (parser.getAttributeName(i).equals(name, ignoreCase = true)) {
+                return parser.getAttributeValue(i)
             }
-            return null
         }
+        return null
     }
 }

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 书架封面 ImageView 绑定当前应显示的封面路径，防止异步解码回来时条目已复用导致错位 -->
+    <item name="cover_path_tag" type="id" />
+</resources>

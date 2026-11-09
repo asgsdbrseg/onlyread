@@ -3,6 +3,7 @@ package com.onlyread.app.util
 import android.content.ContentResolver
 import android.net.Uri
 import android.os.Environment
+import com.onlyread.app.util.Logx
 
 /**
  * M2.2：SAF/file Uri → 真实文件路径（Reasily 式直接引用原文件，不复制）。
@@ -34,7 +35,8 @@ object UriPath {
             cr.query(uri, arrayOf("_data"), null, null, null)?.use { c ->
                 if (c.moveToFirst()) c.getString(0)?.takeIf { it.isNotBlank() } else null
             }
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Logx.w("UriPath", "查询 _data 列失败: $uri", e)
             null
         }
     }

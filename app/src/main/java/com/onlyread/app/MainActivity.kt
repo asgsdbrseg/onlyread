@@ -11,6 +11,7 @@ import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.util.LruCache
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -23,18 +24,43 @@ import com.onlyread.app.browser.FileBrowserActivity
 import com.onlyread.app.data.BookEntity
 import com.onlyread.app.data.BookImporter
 import com.onlyread.app.reader.BookActivity
+import com.onlyread.app.util.Logx
+import java.util.Collections
+import java.util.concurrent.Executors
 
 /**
  * 书架页：最近在读网格 + 权限引导 + 按需导入入口（FR-01）。
  * 纯框架实现：GridView + BaseAdapter + Handler 线程模型。
+ *
+ * 0.4.22：封面加载改为「LruCache + 固定线程池 + ImageView tag 校验」。
+ * 旧实现每次 getView 都 new Thread 解码、无缓存、不校验条目复用，
+ * 快速滑动时既会线程泛滥，也会把 A 书的封面贴到 B 书上（错位）。
  */
 class MainActivity : Activity() {
 
+    companion object {
+        private const val TAG = "MainActivity"
+    }
+
     private val ui = Handler(Looper.getMainLooper())
+    private val io = Executors.newFixedThreadPool(2) { r ->
+        Thread(r, "onlyread-shelf-io").apply { isDaemon = true }
+    }
     private val items = ArrayList<BookEntity>()
     private lateinit var adapter: BookAdapter
     private lateinit var permCard: View
     private lateinit var emptyText: TextView
+
+    /** 封面位图缓存：上限为进程最大内存的 1/8，按字节计。 */
+    private val coverCache = object : LruCache<String, Bitmap>(
+        (Runtime.getRuntime().maxMemory() / 1024).toInt() / 8
+    ) {
+        override fun sizeOf(key: String, value: Bitmap): Int =
+            (value.byteCount / 1024).coerceAtLeast(1)
+    }
+
+    /** 同一路径只保留一个在途解码任务，避免快速滑动时重复排队。 */
+    private val inFlight = Collections.synchronizedSet(HashSet<String>())
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -80,16 +106,29 @@ class MainActivity : Activity() {
 
     private fun hasStoragePermission(): Boolean = Environment.isExternalStorageManager()
 
+    /** 统一后台入口：Activity 销毁后不再回写 UI，异常也留下日志。 */
+    private fun onIo(block: () -> Unit) {
+        io.execute {
+            if (isDestroyed) return@execute
+            try {
+                block()
+            } catch (e: Exception) {
+                Logx.w(TAG, "书架后台任务失败", e)
+            }
+        }
+    }
+
     private fun reload() {
-        Thread {
+        onIo {
             val list = (application as App).db.getAll()
             ui.post {
+                if (isDestroyed) return@post
                 items.clear()
                 items.addAll(list)
                 adapter.notifyDataSetChanged()
                 emptyText.visibility = if (list.isEmpty()) View.VISIBLE else View.GONE
             }
-        }.start()
+        }
     }
 
     private fun requestManagePermission() {
@@ -99,10 +138,12 @@ class MainActivity : Activity() {
         )
         try {
             startActivity(intent)
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Logx.w(TAG, "应用专属权限设置页不可用，回退全局设置页", e)
             try {
                 startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
-            } catch (_: Exception) {
+            } catch (e2: Exception) {
+                Logx.w(TAG, "全局权限设置页也不可用", e2)
                 Toast.makeText(this, R.string.perm_fallback, Toast.LENGTH_LONG).show()
             }
         }
@@ -141,9 +182,10 @@ class MainActivity : Activity() {
             return
         }
         Toast.makeText(this, R.string.tip_importing, Toast.LENGTH_SHORT).show()
-        Thread {
+        onIo {
             val outcome = runCatching { BookImporter.importUri(this@MainActivity, uri) }
             ui.post {
+                if (isDestroyed) return@post
                 outcome.fold(
                     onSuccess = { res ->
                         Toast.makeText(this, res.message, Toast.LENGTH_SHORT).show()
@@ -154,13 +196,14 @@ class MainActivity : Activity() {
                         )
                     },
                     onFailure = { e ->
+                        Logx.w(TAG, "外部 EPUB 导入失败", e)
                         Toast.makeText(
                             this, e.message ?: getString(R.string.open_fail), Toast.LENGTH_LONG
                         ).show()
                     }
                 )
             }
-        }.start()
+        }
     }
 
     private fun deleteBook(b: BookEntity) {
@@ -168,15 +211,16 @@ class MainActivity : Activity() {
             .setTitle(R.string.dialog_delete_title)
             .setMessage(R.string.dialog_delete_msg)
             .setPositiveButton(R.string.action_delete) { _, _ ->
-                Thread {
+                onIo {
                     (application as App).db.deleteById(b.id)
                     // 删除后立即刷新书架（修复：此前要等 onResume 才消失）
                     ui.post {
+                        if (isDestroyed) return@post
                         items.remove(b)
                         adapter.notifyDataSetChanged()
                         emptyText.visibility = if (items.isEmpty()) View.VISIBLE else View.GONE
                     }
-                }.start()
+                }
             }
             .setNegativeButton(R.string.action_cancel, null)
             .show()
@@ -195,14 +239,35 @@ class MainActivity : Activity() {
             val cover = v.findViewById<ImageView>(R.id.cover)
             v.findViewById<TextView>(R.id.title).text = b.title
             v.findViewById<TextView>(R.id.author).text = b.author ?: ""
-            cover.setImageDrawable(null)
-            b.coverPath?.let { p ->
-                Thread {
-                    val bmp = decodeSampled(p, 300, 400)
-                    if (bmp != null) ui.post { cover.setImageBitmap(bmp) }
-                }.start()
+            // 先绑定「本条目应显示的路径」，异步解码回来时用它校验，防止条目复用导致错位
+            cover.setTag(R.id.cover_path_tag, b.coverPath)
+            val path = b.coverPath
+            val cached = if (path != null) coverCache.get(path) else null
+            if (cached != null) {
+                cover.setImageBitmap(cached)
+            } else {
+                cover.setImageDrawable(null)
+                if (path != null) loadCover(path, cover)
             }
             return v
+        }
+    }
+
+    private fun loadCover(path: String, target: ImageView) {
+        if (!inFlight.add(path)) return
+        io.execute {
+            val bmp = try {
+                decodeSampled(path, 300, 400)
+            } catch (e: Exception) {
+                Logx.w(TAG, "封面解码失败: $path", e)
+                null
+            }
+            if (bmp != null) coverCache.put(path, bmp)
+            inFlight.remove(path)
+            ui.post {
+                if (isDestroyed || bmp == null) return@post
+                if (target.getTag(R.id.cover_path_tag) == path) target.setImageBitmap(bmp)
+            }
         }
     }
 
@@ -216,5 +281,12 @@ class MainActivity : Activity() {
         }
         val opts = BitmapFactory.Options().apply { inSampleSize = sample }
         return BitmapFactory.decodeFile(path, opts)
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        ui.removeCallbacksAndMessages(null)
+        io.shutdownNow()
+        coverCache.evictAll()
     }
 }

@@ -5,6 +5,7 @@ import android.content.Context
 import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import com.onlyread.app.util.Logx
 
 /**
  * 书库表（FR-01/FR-02 数据层地基）。
@@ -14,6 +15,8 @@ import android.database.sqlite.SQLiteOpenHelper
  * 实现说明：为保持工程零第三方依赖（纯框架 + Kotlin 标准库），
  * 使用框架 SQLiteOpenHelper 直接实现，表结构与《设计文档 v1.1》§5 一致。
  * v2（M1）：新增 progress（进度锚点，FR-04/FR-11）与 toc（目录缓存，FR-06）。
+ * v4（0.4.22）：toc 增加 frag 列；此前 DB 版本号误设为 3，导致 onUpgrade 的
+ * `oldVersion < 4` 分支永不触发，v3 老库查询 frag 会抛异常并被静默吞掉。
  */
 data class BookEntity(
     val id: Long,
@@ -45,7 +48,17 @@ data class ProgressRow(
     val percent: Double
 )
 
-class BooksDb(context: Context) : SQLiteOpenHelper(context, "onlyread.db", null, 3) {
+class BooksDb(context: Context) : SQLiteOpenHelper(context, "onlyread.db", null, 4) {
+
+    companion object {
+        private const val TAG = "BooksDb"
+        /** 显式列清单：禁止 SELECT *，避免表结构演进后列序错位。 */
+        private const val BOOK_SELECT = "id,path,size,mtime_ms,identity_hash,title,author," +
+            "language,publisher,cover_path,spine_count,added_at,last_read_at," +
+            "font_id,font_px,line_h,font_family"
+        private const val TOC_SELECT = "ord,spine_index,title,level,frag"
+        private const val PROGRESS_SELECT = "spine_index,page_index,total_pages,elem_ordinal,percent"
+    }
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
@@ -66,15 +79,31 @@ class BooksDb(context: Context) : SQLiteOpenHelper(context, "onlyread.db", null,
         if (oldVersion < 2) createV2Tables(db)
         if (oldVersion < 3) {
             // M2：每书排版参数（决策 #17 启用）
-            db.execSQL("ALTER TABLE books ADD COLUMN font_px INTEGER DEFAULT 0")
-            db.execSQL("ALTER TABLE books ADD COLUMN line_h REAL DEFAULT 0")
-            db.execSQL("ALTER TABLE books ADD COLUMN font_family TEXT DEFAULT ''")
+            if (!hasColumn(db, "books", "font_px")) {
+                db.execSQL("ALTER TABLE books ADD COLUMN font_px INTEGER DEFAULT 0")
+                db.execSQL("ALTER TABLE books ADD COLUMN line_h REAL DEFAULT 0")
+                db.execSQL("ALTER TABLE books ADD COLUMN font_family TEXT DEFAULT ''")
+            }
         }
         if (oldVersion < 4) {
-            // M2.1：目录缓存增加 #fragment 列（同文件多标题跳转）
-            try { db.execSQL("ALTER TABLE toc ADD COLUMN frag TEXT DEFAULT ''") } catch (_: Exception) {}
+            // M2.1：目录缓存增加 #fragment 列（同文件多标题跳转）。
+            // 先查列再改表：既不吞异常，也能兼容「v2 建表时已带 frag」的库。
+            if (!hasColumn(db, "toc", "frag")) {
+                db.execSQL("ALTER TABLE toc ADD COLUMN frag TEXT DEFAULT ''")
+            }
         }
     }
+
+    /** PRAGMA 查询列是否存在，替代 try/catch 静默忽略 ALTER 失败。 */
+    private fun hasColumn(db: SQLiteDatabase, table: String, column: String): Boolean =
+        db.rawQuery("PRAGMA table_info($table)", null).use { c ->
+            val nameIdx = c.getColumnIndex("name")
+            if (nameIdx < 0) return@use false
+            while (c.moveToNext()) {
+                if (c.getString(nameIdx).equals(column, ignoreCase = true)) return@use true
+            }
+            false
+        }
 
     private fun createV2Tables(db: SQLiteDatabase) {
         // 进度锚点（FR-04）：每书一行，INSERT OR REPLACE 覆盖
@@ -99,7 +128,7 @@ class BooksDb(context: Context) : SQLiteOpenHelper(context, "onlyread.db", null,
     fun getAll(): List<BookEntity> {
         val out = ArrayList<BookEntity>()
         readableDatabase.rawQuery(
-            "SELECT * FROM books ORDER BY CASE WHEN last_read_at > 0 THEN last_read_at ELSE added_at END DESC",
+            "SELECT $BOOK_SELECT FROM books ORDER BY CASE WHEN last_read_at > 0 THEN last_read_at ELSE added_at END DESC",
             null
         ).use { c ->
             while (c.moveToNext()) out.add(fromCursor(c))
@@ -108,7 +137,9 @@ class BooksDb(context: Context) : SQLiteOpenHelper(context, "onlyread.db", null,
     }
 
     fun getById(id: Long): BookEntity? {
-        readableDatabase.rawQuery("SELECT * FROM books WHERE id=?", arrayOf(id.toString())).use { c ->
+        readableDatabase.rawQuery(
+            "SELECT $BOOK_SELECT FROM books WHERE id=?", arrayOf(id.toString())
+        ).use { c ->
             return if (c.moveToFirst()) fromCursor(c) else null
         }
     }
@@ -170,11 +201,17 @@ class BooksDb(context: Context) : SQLiteOpenHelper(context, "onlyread.db", null,
 
     fun getProgress(bookId: Long): ProgressRow? {
         readableDatabase.rawQuery(
-            "SELECT spine_index, page_index, total_pages, elem_ordinal, percent FROM progress WHERE book_id=?",
+            "SELECT $PROGRESS_SELECT FROM progress WHERE book_id=?",
             arrayOf(bookId.toString())
         ).use { c ->
             if (c.moveToFirst()) {
-                return ProgressRow(c.getInt(0), c.getInt(1), c.getInt(2), c.getInt(3), c.getDouble(4))
+                return ProgressRow(
+                    c.getInt(c.getColumnIndexOrThrow("spine_index")),
+                    c.getInt(c.getColumnIndexOrThrow("page_index")),
+                    c.getInt(c.getColumnIndexOrThrow("total_pages")),
+                    c.getInt(c.getColumnIndexOrThrow("elem_ordinal")),
+                    c.getDouble(c.getColumnIndexOrThrow("percent"))
+                )
             }
         }
         return null
@@ -220,34 +257,48 @@ class BooksDb(context: Context) : SQLiteOpenHelper(context, "onlyread.db", null,
     fun getToc(bookId: Long): List<TocRow> {
         val out = ArrayList<TocRow>()
         readableDatabase.rawQuery(
-            "SELECT ord, spine_index, title, level, frag FROM toc WHERE book_id=? ORDER BY ord",
+            "SELECT $TOC_SELECT FROM toc WHERE book_id=? ORDER BY ord",
             arrayOf(bookId.toString())
         ).use { c ->
+            val iOrd = c.getColumnIndexOrThrow("ord")
+            val iSpine = c.getColumnIndexOrThrow("spine_index")
+            val iTitle = c.getColumnIndexOrThrow("title")
+            val iLevel = c.getColumnIndexOrThrow("level")
+            val iFrag = c.getColumnIndexOrThrow("frag")
             while (c.moveToNext()) {
-                out.add(TocRow(c.getInt(0), c.getInt(1), c.getString(2) ?: "", c.getInt(3), c.getString(4) ?: ""))
+                out.add(
+                    TocRow(
+                        c.getInt(iOrd), c.getInt(iSpine), c.getString(iTitle) ?: "",
+                        c.getInt(iLevel), c.getString(iFrag) ?: ""
+                    )
+                )
             }
         }
         return out
     }
 
-    private fun fromCursor(c: Cursor) = BookEntity(
-        id = c.getLong(0),
-        path = c.getString(1) ?: "",
-        size = c.getLong(2),
-        mtimeMs = c.getLong(3),
-        identityHash = c.getString(4) ?: "",
-        title = c.getString(5) ?: "",
-        author = c.getString(6),
-        language = c.getString(7),
-        publisher = c.getString(8),
-        coverPath = c.getString(9),
-        spineCount = c.getInt(10),
-        addedAt = c.getLong(11),
-        lastReadAt = c.getLong(12),
-        fontId = if (c.isNull(13)) null else c.getLong(13),
-        fontPx = if (c.isNull(14)) 0 else c.getInt(14),
-        lineH = if (c.isNull(15)) 0.0 else c.getDouble(15),
-        fontFamily = c.getString(16) ?: ""
+    /** 按列名取值，绝不依赖 SELECT * 的列顺序。 */
+    private fun fromCursor(c: Cursor): BookEntity = BookEntity(
+        id = c.getLong(c.getColumnIndexOrThrow("id")),
+        path = c.getString(c.getColumnIndexOrThrow("path")) ?: "",
+        size = c.getLong(c.getColumnIndexOrThrow("size")),
+        mtimeMs = c.getLong(c.getColumnIndexOrThrow("mtime_ms")),
+        identityHash = c.getString(c.getColumnIndexOrThrow("identity_hash")) ?: "",
+        title = c.getString(c.getColumnIndexOrThrow("title")) ?: "",
+        author = c.getString(c.getColumnIndexOrThrow("author")),
+        language = c.getString(c.getColumnIndexOrThrow("language")),
+        publisher = c.getString(c.getColumnIndexOrThrow("publisher")),
+        coverPath = c.getString(c.getColumnIndexOrThrow("cover_path")),
+        spineCount = c.getInt(c.getColumnIndexOrThrow("spine_count")),
+        addedAt = c.getLong(c.getColumnIndexOrThrow("added_at")),
+        lastReadAt = c.getLong(c.getColumnIndexOrThrow("last_read_at")),
+        fontId = if (c.isNull(c.getColumnIndexOrThrow("font_id"))) null
+        else c.getLong(c.getColumnIndexOrThrow("font_id")),
+        fontPx = if (c.isNull(c.getColumnIndexOrThrow("font_px"))) 0
+        else c.getInt(c.getColumnIndexOrThrow("font_px")),
+        lineH = if (c.isNull(c.getColumnIndexOrThrow("line_h"))) 0.0
+        else c.getDouble(c.getColumnIndexOrThrow("line_h")),
+        fontFamily = c.getString(c.getColumnIndexOrThrow("font_family")) ?: ""
     )
 
     // ————— 导入去重（M3.10） —————
@@ -265,8 +316,9 @@ class BooksDb(context: Context) : SQLiteOpenHelper(context, "onlyread.db", null,
         val cv = ContentValues().apply { put("path", path) }
         try {
             writableDatabase.update("books", cv, "id=?", arrayOf(id.toString()))
-        } catch (_: Exception) {
+        } catch (e: Exception) {
             // UNIQUE 冲突（该路径已被另一条记录占用）时保持原记录不动
+            Logx.w(TAG, "路径归一跳过（可能 UNIQUE 冲突）: $path", e)
         }
     }
 
@@ -302,7 +354,8 @@ class BooksDb(context: Context) : SQLiteOpenHelper(context, "onlyread.db", null,
                 if (p.isEmpty()) continue
                 val key = try {
                     java.io.File(p).canonicalPath
-                } catch (_: Exception) {
+                } catch (e: Exception) {
+                    Logx.w(TAG, "canonicalPath 失败，退化为原路径: $p", e)
                     p
                 }
                 val prev = seen[key]

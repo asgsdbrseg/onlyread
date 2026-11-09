@@ -16,6 +16,7 @@ import android.widget.TextView
 import android.widget.Toast
 import com.onlyread.app.R
 import com.onlyread.app.data.BookImporter
+import com.onlyread.app.util.Logx
 import java.io.File
 
 /**
@@ -69,7 +70,8 @@ class FileBrowserActivity : Activity() {
                 addCategory(Intent.CATEGORY_OPENABLE)
             }
             startActivityForResult(Intent.createChooser(i, getString(R.string.import_pick)), PICK_EPUB)
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Logx.w("FileBrowser", "启动文件选择器失败", e)
             Toast.makeText(this, R.string.pick_font_fail, Toast.LENGTH_SHORT).show()
         }
     }

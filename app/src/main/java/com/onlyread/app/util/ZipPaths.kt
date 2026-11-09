@@ -1,5 +1,6 @@
 package com.onlyread.app.util
 
+import com.onlyread.app.util.Logx
 import java.net.URLDecoder
 import java.nio.charset.Charset
 
@@ -31,7 +32,9 @@ object ZipPaths {
     fun decode(path: String): String =
         try {
             URLDecoder.decode(path, "UTF-8")
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            // 非法 % 转义等畸形 IRI：按原串处理，保持与浏览器一致
+            Logx.w("ZipPaths", "URL 解码失败，按原路径处理: $path", e)
             path
         }
 

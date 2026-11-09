@@ -8,6 +8,7 @@ import com.onlyread.app.R
 import com.onlyread.app.epub.EpubArchive
 import com.onlyread.app.util.EpubNames
 import com.onlyread.app.util.Hashing
+import com.onlyread.app.util.Logx
 import com.onlyread.app.util.UriPath
 import java.io.File
 
@@ -20,6 +21,8 @@ import java.io.File
  * 带提示文案的异常，由调用方提示用户改用系统「文件」应用选择本机文件。
  */
 object BookImporter {
+
+    private const val TAG = "BookImporter"
 
     data class Result(
         val bookId: Long,
@@ -43,7 +46,8 @@ object BookImporter {
             val i = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
             if (i >= 0 && c.moveToFirst()) c.getString(i) else null
         }
-    } catch (_: Exception) {
+    } catch (e: Exception) {
+        Logx.w(TAG, "读取 Uri 显示名失败", e)
         null
     }
 
@@ -68,7 +72,12 @@ object BookImporter {
         // ⚠️ 路径归一化：外部「打开方式」经 file:///sdcard/... 或 provider 的 _data 列得到的路径，
         // 与应用内文件浏览器遍历出的 /storage/emulated/0/... 常常只是同一文件的不同写法。
         // canonicalFile 解析符号链接后两者一致，避免同一本书被登记两次。
-        val canonical = try { file.canonicalFile } catch (_: Exception) { file }
+        val canonical = try {
+            file.canonicalFile
+        } catch (e: Exception) {
+            Logx.w(TAG, "canonicalFile 归一失败，使用原路径", e)
+            file
+        }
         val path = canonical.absolutePath
         val fallback = canonical.nameWithoutExtension
 
@@ -120,7 +129,8 @@ object BookImporter {
                         TocRow(i, t.spineIndex, t.title, t.level, t.frag ?: "")
                     }
                 )
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                Logx.w(TAG, "目录缓存写入失败（不影响书籍登记）", e)
             }
             book.coverPath?.let { href ->
                 archive.entryBytes(href)?.let { bytes ->

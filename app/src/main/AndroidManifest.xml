@@ -32,10 +32,11 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.OnlyRead">
 
+        <!-- 0.4.22：不再拦截配置变化，交给系统重建（这两个页面无自绘分页状态，
+             onSaveInstanceState 已覆盖所需状态）。 -->
         <activity
             android:name=".MainActivity"
-            android:exported="true"
-            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden">
+            android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -84,9 +85,11 @@
 
         <activity
             android:name=".browser.FileBrowserActivity"
-            android:exported="false"
-            android:configChanges="orientation|screenSize|screenLayout" />
+            android:exported="false" />
 
+        <!-- BookActivity 例外：分页几何、锚点、已加载的 WebView 需跨旋屏保留，
+             且必须拦截 keyboardHidden，否则输入法弹出会触发 Activity 重建、
+             令搜索窗口与选区浮层消失。窗口固定 adjustNothing，浮层位置由代码写死。 -->
         <activity
             android:name=".reader.BookActivity"
             android:exported="false"
