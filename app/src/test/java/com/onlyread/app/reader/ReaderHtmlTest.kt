@@ -342,4 +342,62 @@ class ReaderHtmlTest {
         val html = "<style>p{font-family:宋体;}</style>"
         assertEquals(html, ReaderHtml.prependFontFamilyInHtml(html, ""))
     }
+
+    // ——— 0.4.29：单块多命中（古籍常用一个 <div> 承载整章正文）———
+
+    /** 复现用户反馈：《姑妄言》第二十一卷整章一个 div、14 处「曹門」，旧逻辑只报 1 条。 */
+    @Test
+    fun plainRanges_reportsEveryHitInOneBlock() {
+        val para = listOf(
+            "有事則登牌守禦。三月二十三日未時。賊七騎飛奔曹門。貼偽告示二張於柵上。",
+            "王知縣半夜遣人召李光聖為石所總社。統社兵各照汛地防守曹門至北門。",
+            "磚石不能擊者。擊以柴加烘藥下燒之。自曹門至北門。環垣十餘里。",
+            "俱縛手斬擲蓮花池。城在曹門北心字樓下掘一巨洞。",
+            "每日人給麥一升。自曹門至北門十餘里。城凡鑿三十六處。",
+            "闖賊復回聞李蓁老營打糧。惟曹門外只二十里。",
+            "城中乏糧。豎大白旗於曹門上。大書。汴梁豪傑願從吾游者立此旗下。",
+            "週圍俱步賊。每夜發喊鳴更。曹門將官夜刎賊營。",
+            "馬賊俱在大堤上。曹門將官夜刎賊營。被賊斷雙手。",
+            "曹門外南北隅有葦坡數十頃。",
+            "賊於曹門外築高臺。",
+            "守曹門者晝夜不懈。",
+            "曹門至北門一帶俱有賊騎。",
+            "是夜復攻曹門。"
+        )
+        val html = "<div class=\"chapter\">" + para.joinToString("") { "<p>$it</p>" } + "</div>"
+        // 外层 div 会吞掉内部所有 <p>，整章只算 1 个块——这正是旧版只报 1 条的原因
+        assertEquals("整章应被合成单个块", 1, ReaderHtml.BLOCK_PATTERN.findAll(html).count())
+        val block = checkNotNull(ReaderHtml.BLOCK_PATTERN.find(html))
+        val text = ReaderHtml.extractVisibleText(block.groupValues[3])
+        val ranges = ReaderHtml.plainRanges(text, "曹門")
+        assertEquals("单块内 14 处命中应全部返回", 14, ranges.size)
+        for (i in ranges.indices) {
+            if (i > 0) assertTrue("命中位置应递增", ranges[i].first > ranges[i - 1].last)
+            assertTrue("每条片段都应包含命中词", ReaderHtml.buildSnippet(text, ranges[i]).contains("曹門"))
+        }
+        assertNotEquals(
+            "第 1 条与第 14 条片段不应相同",
+            ReaderHtml.buildSnippet(text, ranges[0]), ReaderHtml.buildSnippet(text, ranges[13])
+        )
+    }
+
+    @Test
+    fun plainRanges_noOverlapAndCaseInsensitive() {
+        val ranges = ReaderHtml.plainRanges("aaAaaa", "aa")
+        assertEquals(3, ranges.size)
+        ranges.forEach { assertEquals(2, it.last - it.first + 1) }
+        assertTrue(ranges.zipWithNext().all { (a, b) -> b.first > a.last })
+    }
+
+    @Test
+    fun regexRanges_expandedVariantsFindsAllHits() {
+        val text = (1..14).joinToString("。") { "第${it}處曹門與曹门並見" }
+        val ranges = ReaderHtml.regexRanges(text, Regex("[曹曺][門门]", RegexOption.IGNORE_CASE))
+        assertEquals("异体字展开后每处两种写法都应命中", 28, ranges.size)
+    }
+
+    @Test
+    fun regexRanges_skipsEmptyMatches() {
+        assertTrue("空匹配不应产生无意义结果", ReaderHtml.regexRanges("甲乙丙", Regex("x*")).isEmpty())
+    }
 }

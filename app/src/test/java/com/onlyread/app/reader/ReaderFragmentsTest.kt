@@ -137,4 +137,123 @@ class ReaderFragmentsTest {
         assertTrue(out.contains("<mark class=\"__srch\" data-srch-hit>春</mark>"))
         assertEquals(2, Regex("<mark").findAll(out).count())
     }
+
+    // ——— 0.4.29：按块内序号选精确锚点 ———
+
+    @Test
+    fun anchorMarkAt_marksNthHitOnly() {
+        val html = "甲<mark class=\"__srch\">一</mark>乙<mark class=\"__srch\">二</mark>" +
+                "丙<mark class=\"__srch\">三</mark>"
+        val out = ReaderFragments.anchorMarkAt(html, 2)
+        assertEquals(
+            "甲<mark class=\"__srch\">一</mark>乙<mark class=\"__srch\">二</mark>" +
+                "丙<mark class=\"__srch\" data-srch-hit>三</mark>", out
+        )
+        assertEquals(1, Regex("data-srch-hit").findAll(out).count())
+    }
+
+    @Test
+    fun anchorMarkAt_ordinalBeyondMarksFallsBackToLast() {
+        val html = "<mark class=\"__srch\">一</mark><mark class=\"__srch\">二</mark>"
+        val out = ReaderFragments.anchorMarkAt(html, 9)
+        assertTrue(
+            "序号越界应回退到最后一个 mark",
+            out.endsWith("<mark class=\"__srch\" data-srch-hit>二</mark>")
+        )
+        assertEquals(1, Regex("data-srch-hit").findAll(out).count())
+    }
+
+    @Test
+    fun anchorMarkAt_zeroEquivalentToAnchorFirstMark() {
+        val html = "<mark class=\"__srch\">一</mark><mark class=\"__srch\">二</mark>"
+        assertEquals(ReaderFragments.anchorFirstMark(html), ReaderFragments.anchorMarkAt(html, 0))
+    }
+
+    @Test
+    fun anchorMarkAt_noMarkKeepsHtmlIntact() {
+        val html = "<p>没有命中词的正文</p>"
+        assertEquals(html, ReaderFragments.anchorMarkAt(html, 5))
+    }
+
+    @Test
+    fun anchorMarkAt_worksOnOutputOfMarkSrchText() {
+        val marked = ReaderFragments.markSrchText("<p>曹門曹門曹門</p>", Regex("曹門"))
+        val out = ReaderFragments.anchorMarkAt(marked, 1)
+        assertEquals(3, Regex("<mark").findAll(out).count())
+        assertEquals(1, Regex("data-srch-hit").findAll(out).count())
+        assertTrue(out.contains("曹門</mark><mark class=\"__srch\" data-srch-hit>曹門"))
+    }
+
+    // ——— 0.4.30：跨标签命中高亮（参考 entry.js） ———
+
+    @Test
+    fun markSrchText_highlightsAcrossInlineTags() {
+        // 旧实现按文本段单独跑正则，跨 <u> 的「曹門」无法命中 → 跳转后不高亮
+        val out = ReaderFragments.markSrchText("甲<u>曹</u><u>門</u>乙", Regex("曹門"))
+        assertEquals(
+            "甲<u><mark class=\"__srch\">曹</mark></u><u><mark class=\"__srch\">門</mark></u>乙",
+            out
+        )
+    }
+
+    @Test
+    fun markSrchText_crossesMultipleInlineTagsInOneHit() {
+        val out = ReaderFragments.markSrchText("<u>南</u><u>朝</u><u>宋</u>", Regex("南朝宋"))
+        assertEquals(3, Regex("<mark").findAll(out).count())
+        assertTrue(out.contains("<mark class=\"__srch\">南</mark>"))
+        assertTrue(out.contains("<mark class=\"__srch\">朝</mark>"))
+        assertTrue(out.contains("<mark class=\"__srch\">宋</mark>"))
+    }
+
+    @Test
+    fun markSrchText_doesNotCrossBlockLevelTags() {
+        // 块级标签按空白分隔，与 extractVisibleText 同口径，不误把跨段文字拼成命中
+        val out = ReaderFragments.markSrchText("<p>曹</p><p>門</p>", Regex("曹門"))
+        assertEquals(0, Regex("<mark").findAll(out).count())
+    }
+
+    @Test
+    fun markSrchText_ordinalCountsHitsNotMarks() {
+        // 一处跨标签命中产生 2 个 mark，但只对应 1 个 data-srch-ord
+        val out = ReaderFragments.markSrchText(
+            "<u>曹</u><u>門</u>", Regex("曹門"), withOrdinal = true
+        )
+        assertEquals(2, Regex("<mark").findAll(out).count())
+        assertEquals(1, Regex("data-srch-ord=\"0\"").findAll(out).count())
+        assertFalse(out.contains("data-srch-ord=\"1\""))
+    }
+
+    @Test
+    fun markSrchText_ordinalNumbersEachHit() {
+        // 前一处连续命中(1 mark) + 后一处跨标签命中(2 mark)：ord 按命中数递增
+        val out = ReaderFragments.markSrchText(
+            "曹門<u>曹</u><u>門</u>", Regex("曹門"), withOrdinal = true
+        )
+        assertEquals(3, Regex("<mark").findAll(out).count())
+        assertEquals(1, Regex("data-srch-ord=\"0\"").findAll(out).count())
+        assertEquals(1, Regex("data-srch-ord=\"1\"").findAll(out).count())
+    }
+
+    @Test
+    fun anchorMarkAt_usesOrdinalAcrossSplitMarks() {
+        // 第 0 处命中连续(1 mark, ord=0)，第 1 处命中跨标签(2 mark, ord=1)。
+        // 应标在 ord=1 的首 mark，而不是「第 1 个 mark」或「最后一个 mark」
+        val inner = "<mark class=\"__srch\" data-srch-ord=\"0\">曹門</mark>" +
+                "<mark class=\"__srch\" data-srch-ord=\"1\">曹</mark>" +
+                "<b><mark class=\"__srch\">門</mark></b>"
+        val out = ReaderFragments.anchorMarkAt(inner, 1)
+        assertEquals(1, Regex("data-srch-hit").findAll(out).count())
+        assertTrue(out.contains("<mark class=\"__srch\" data-srch-hit data-srch-ord=\"1\">曹</mark>"))
+        assertFalse(out.contains("data-srch-hit data-srch-ord=\"0\""))
+        assertFalse(out.contains("<mark class=\"__srch\" data-srch-hit>門"))
+    }
+
+    @Test
+    fun anchorMarkAt_endToEndOnCrossTagMarkSrchText() {
+        val inner = "甲曹門乙<u>曹</u><u>門</u>丙"
+        val marked = ReaderFragments.markSrchText(inner, Regex("曹門"), withOrdinal = true)
+        val out = ReaderFragments.anchorMarkAt(marked, 1)
+        assertEquals(1, Regex("data-srch-hit").findAll(out).count())
+        assertTrue(out.contains("data-srch-hit data-srch-ord=\"1\">曹</mark>"))
+    }
 }

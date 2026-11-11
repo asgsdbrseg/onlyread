@@ -1,0 +1,23 @@
+onlyread 签名密钥说明
+======================
+
+文件：onlyread-release.jks（与 download/onlyread/app/keystore.jks 同一密钥）
+
+- 别名 (alias)        : onlyread
+- keystore 密码       : onlyread2026
+- key 密码            : onlyread2026
+- 算法                : RSA 2048，有效期 10000 天
+- 证书 DN             : CN=onlyread, OU=personal, O=onlyread, C=CN
+- 证书 SHA-256        : e8b49514e0b91304d1366d7c8f5f5bb49a14185d9f472e9860e472852ea99fd0
+
+用途：
+1. 以后所有 onlyread APK 升级安装必须用同一密钥签名，请妥善备份本文件；
+2. 配置 GitHub Actions 时上传为 Secret：
+   ONLYREAD_KEYSTORE_BASE64 = 本文件 base64 编码结果
+   ONLYREAD_KS_PASSWORD      = onlyread2026
+   ONLYREAD_KEY_ALIAS        = onlyread
+   ONLYREAD_KEY_PASSWORD     = onlyread2026
+
+安全提醒：
+- 该密钥为个人自用开发密钥，密码已在构建脚本中明文出现；如需对外分发，
+  建议重新生成密钥并更换密码（keytool -genkeypair），并同步更新 CI Secrets。

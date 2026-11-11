@@ -95,6 +95,35 @@ object ReaderHtml {
     }
 
     /**
+     * 0.4.29：返回一个块内的**全部**命中位置（不重叠）。
+     *
+     * 古籍 EPUB 常以单个 `<div>` 承载整章正文、段落之间只有 `<br/>`，或由外层
+     * `<div>` 包住多个 `<p>`；[BLOCK_PATTERN] 会把它们合成一个很大的块。旧扫描对
+     * 每个块只取首个命中（indexOf / Regex.find），整章十几处命中就只报 1 条结果。
+     * 现在逐命中生成结果，点击第 N 条按块内序号定位到对应位置。
+     *
+     * 纯文本快路径直接在 [text] 上忽略大小写查找，索引与 [text] 完全一致，
+     * 不会因 lowercase 改变字符串长度而错位。
+     */
+    fun plainRanges(text: String, qLower: String): List<IntRange> {
+        if (qLower.isEmpty()) return emptyList()
+        val out = ArrayList<IntRange>()
+        var start = 0
+        val step = qLower.length
+        while (start <= text.length - step) {
+            val idx = text.indexOf(qLower, start, ignoreCase = true)
+            if (idx < 0) break
+            out.add(IntRange(idx, idx + step - 1))
+            start = idx + step // 不重叠，与 Regex.findAll 行为一致
+        }
+        return out
+    }
+
+    /** 正则路径的全部命中；跳过空匹配（无法高亮 / 定位，且会产生大量无意义结果）。 */
+    fun regexRanges(text: String, re: Regex): List<IntRange> =
+        re.findAll(text).mapNotNull { if (it.range.isEmpty()) null else it.range }.toList()
+
+    /**
      * 章节 HTML 注释块标记（data-fnhide）——M3 正文注释不进排版流、弹窗可取。
      * 原 BookActivity.doLoad 的多趟标记逻辑原样迁移为独立纯函数，以便在后台线程执行。
      *

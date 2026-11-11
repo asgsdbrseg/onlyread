@@ -7,7 +7,8 @@ import org.junit.Test
  * 异体字表纯函数单元测试（JUnit 4，JVM，无 Android 依赖）。
  *
  * 覆盖：JSON 解析、字面查询展开、增补平面汉字（𲈛 为 UTF-16 代理对）不被拆坏、
- * 展开后的正则确实能命中各种异体写法、开关关闭 / 手写正则 / 配置顺序与重复项原样保留等边界。
+ * 展开后的正则确实能命中各种异体写法、含元字符时元字符保留且字面汉字仍展开、
+ * 开关关闭 / 配置顺序与重复项原样保留等边界。
  */
 class VariantsTest {
 
@@ -73,11 +74,37 @@ class VariantsTest {
     }
 
     @Test
-    fun handwrittenRegexIsNotRewritten() {
+    fun metaCharsArePreservedButLiteralHanStillExpands() {
         val map = Variants.parse(sampleJson)
-        // 搜索框「正则恒启用」：含元字符时用户正则优先，不做异体字改写
-        assertEquals("黄.钟", Variants.expandQuery("黄.钟", map))
-        assertEquals("^[黄鐘]", Variants.expandQuery("^[黄鐘]", map))
+        // 参考 advanced_search.py：取消「含元字符就退出异体展开」——元字符原样保留，
+        // 字面汉字照样展开成字符类。^黄.*钟$ 里的 ^ .* $ 保留，黄/钟 仍展开。
+        assertEquals("[黄黃].[钟锺𲈛鍾鐘]", Variants.expandQuery("黄.钟", map))
+        assertEquals("^[黄黃]*[钟锺𲈛鍾鐘]$", Variants.expandQuery("^黄*钟$", map))
+    }
+
+    @Test
+    fun escapeSequencesAndGroupsAreKeptIntact() {
+        val map = Variants.parse(sampleJson)
+        // \d、\. 等转义序列整段保留；分组、量词、选择分支原样保留
+        assertEquals("[黄黃]\\d[钟锺𲈛鍾鐘]", Variants.expandQuery("黄\\d钟", map))
+        assertEquals("[黄黃]\\.[钟锺𲈛鍾鐘]", Variants.expandQuery("黄\\.钟", map))
+        assertEquals("([黄黃]|[钟锺𲈛鍾鐘])+", Variants.expandQuery("(黄|钟)+", map))
+    }
+
+    @Test
+    fun characterClassLiteralsAreExpandedInPlace() {
+        val map = Variants.parse(sampleJson)
+        // 字符类内的字面汉字把异体并入当前类，不再额外套一层 []
+        assertEquals("[黄黃钟锺𲈛鍾鐘]", Variants.expandQuery("[黄鐘]", map))
+    }
+
+    @Test
+    fun expandedRegexWithMetaStillMatchesVariants() {
+        val map = Variants.parse(sampleJson)
+        val re = Regex(Variants.expandQuery("^黄钟$", map))
+        assertTrue("含锚点也应命中异体写法", re.containsMatchIn("黄锺"))
+        assertTrue(re.containsMatchIn("黃鐘"))
+        assertFalse("不应命中无关词", re.containsMatchIn("黄粱一梦"))
     }
 
     @Test

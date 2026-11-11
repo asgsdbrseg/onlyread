@@ -1402,7 +1402,9 @@ class BookActivity : Activity() {
 
     private class SearchHit(
         val spineIndex: Int, val elemIndex: Int, val label: String,
-        val query: String, val regexFlag: Boolean
+        val query: String, val regexFlag: Boolean,
+        /** 0.4.29：块内第几个命中；同一块可能有多处命中，跳转时按序号选精确锚点 */
+        val hitOrdinal: Int = 0
     )
 
     /** M3：结果条目高亮命中词（加粗 + 链接色），正则恒启用与扫描同规则 */
@@ -1567,8 +1569,9 @@ class BookActivity : Activity() {
         fun runSearch() {
             val raw = et.text.toString().trim()
             if (raw.isEmpty()) return
-            // M3.8：异体字展开——开关开启时按表把字面查询展开为字符类（如 黄钟 → [黄黃][钟锺…]）；
-            // 查询含正则元字符视为用户手写正则，expandQuery 原样返回不改写
+            // M3.8：异体字展开——开关开启时按表把字面查询展开为字符类（如 黄钟 → [黄黃][钟锺…]）。
+            // 0.4.30：含正则元字符不再整体退出展开；元字符 / 转义序列 / 量词原样保留，
+            // 字面汉字照样展开（参考 advanced_search.py 的 expand_pattern_variants）。
             val q = if (variantsOn) Variants.expandQuery(raw, VariantsStore.current()) else raw
             // M3.10：点「搜索」后立即显示展开状态，并贯穿进度 / 完成 / 停止各阶段
             val variantTip =
@@ -1601,7 +1604,10 @@ class BookActivity : Activity() {
             val qLower = q.lowercase()
             fun refresh(final: Boolean) {
                 val snapshot = synchronized(collected) {
-                    collected.sortedWith(compareBy({ it.spineIndex }, { it.elemIndex }))
+                    // 0.4.29：同一块的多条结果靠 hitOrdinal 保持正文先后顺序
+                    collected.sortedWith(
+                        compareBy({ it.spineIndex }, { it.elemIndex }, { it.hitOrdinal })
+                    )
                 }
                 ui.post {
                     if (session != searchSession || searchCancelled) return@post // 过期会话：丢弃
@@ -1644,13 +1650,17 @@ class BookActivity : Activity() {
                                 if (searchCancelled || Thread.currentThread().isInterrupted) break
                                 val text = ReaderHtml.extractVisibleText(m.groupValues[3])
                                 if (text.isEmpty()) { ei++; continue }
-                                val mm: IntRange? = if (isPlain) {
-                                    val idx = text.lowercase().indexOf(qLower)
-                                    if (idx >= 0) IntRange(idx, idx + q.length - 1) else null
-                                } else re.find(text)?.range
-                                if (mm != null) {
-                                    val snip = ReaderHtml.buildSnippet(text, mm)
-                                    collected.add(SearchHit(i, ei, snip, q, true))
+                                // 0.4.29：一个块可能承载整章正文（古籍常用单个 <div> + <br/>），
+                                // 必须收集块内全部命中，否则「曹門」这类一章出现十几次的词只报 1 条。
+                                val ranges = if (isPlain)
+                                    ReaderHtml.plainRanges(text, qLower)
+                                else ReaderHtml.regexRanges(text, re)
+                                var ordinal = 0
+                                for (r in ranges) {
+                                    if (searchCancelled || Thread.currentThread().isInterrupted) break
+                                    val snip = ReaderHtml.buildSnippet(text, r)
+                                    collected.add(SearchHit(i, ei, snip, q, true, ordinal))
+                                    ordinal++
                                 }
                                 ei++
                             }
@@ -1785,10 +1795,17 @@ class BookActivity : Activity() {
                 return Pair(hidden, targetId)
             }
             fun injected(m: MatchResult, mark: Boolean, extra: String): String {
-                val inner = if (mark && re != null) ReaderFragments.markSrchText(m.groupValues[3], re) else m.groupValues[3]
-                // 0.4.24：把命中词的第一个 <mark> 标为精确锚点。块上的 data-srch0 仍保留
+                // 0.4.30：withOrdinal=true 让每处命中的首 mark 带 data-srch-ord，
+                // 跨标签命中被拆成多个 mark 后仍可按「命中序号」精确定位（参考 entry.js）。
+                val inner = if (mark && re != null)
+                    ReaderFragments.markSrchText(m.groupValues[3], re, withOrdinal = true)
+                else m.groupValues[3]
+                // 0.4.24：把命中词的首个 <mark> 标为精确锚点。块上的 data-srch0 仍保留
                 // （隐藏规则 / 兜底），但跨列块的 rect 是碎片并集，不能拿它算页码。
-                val anchored = if (mark && re != null) ReaderFragments.anchorFirstMark(inner) else inner
+                // 0.4.29 / 0.4.30：按结果在块内的序号选精确锚点，点第 N 条跳到第 N 处命中；
+                // 跨标签命中拆成多个 mark 时按 data-srch-ord 定位，不再一律落到块首（越界回退最后 mark）。
+                val anchored = if (mark && re != null)
+                    ReaderFragments.anchorMarkAt(inner, h.hitOrdinal) else inner
                 return "<" + m.groupValues[1] + m.groupValues[2] + extra + " data-srch0>" +
                     anchored + "</" + m.groupValues[1] + ">"
             }
