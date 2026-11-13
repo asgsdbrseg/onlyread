@@ -45,6 +45,7 @@ import com.onlyread.app.data.TocRow
 import com.onlyread.app.epub.EpubArchive
 import com.onlyread.app.epub.EpubBook
 import com.onlyread.app.util.Logx
+import com.onlyread.app.util.SystemBarInsets
 import com.onlyread.app.util.UriPath
 import com.onlyread.app.util.ZipPaths
 import java.util.concurrent.ConcurrentHashMap
@@ -1376,12 +1377,13 @@ class BookActivity : Activity() {
             }
             closeMenuOverlay()
         }
+        // 0.4.36：目录不设「取消」按钮——点遮罩 / 返回键即可关闭；
+        // 余下「阅读设置」「全文搜索」两个按钮在按钮栏内水平居中。
         showMenuOverlay(
             getString(R.string.toc_title), content,
             listOf(
                 getString(R.string.settings_title) to { closeMenuOverlay(); openSettings() },
-                getString(R.string.search_title) to { closeMenuOverlay(); showSearch() },
-                getString(R.string.action_cancel) to { closeMenuOverlay() }
+                getString(R.string.search_title) to { closeMenuOverlay(); showSearch() }
             )
         )
         // M3：目录自动定位——当前章节滚到屏幕中部
@@ -1976,12 +1978,19 @@ class BookActivity : Activity() {
                     LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1))
                 val bar = LinearLayout(this@BookActivity).apply {
                     orientation = LinearLayout.HORIZONTAL
-                    gravity = android.view.Gravity.END or android.view.Gravity.CENTER_VERTICAL
+                    // 0.4.36：按钮栏水平居中（目录去掉「取消」后两个按钮居中，设置「完成」同样居中）
+                    gravity = android.view.Gravity.CENTER
                     val q = (8 * d).toInt()
                     setPadding(q, (6 * d).toInt(), q, (6 * d).toInt())
                 }
                 buttons.forEach { (label, action) ->
-                    bar.addView(themeFlatButton(label).apply { setOnClickListener { action() } })
+                    bar.addView(themeFlatButton(label).apply {
+                        setOnClickListener { action() }
+                        // 对称左右间距，避免默认 6dp 左 margin 让居中整体偏右
+                        (layoutParams as? LinearLayout.LayoutParams)?.setMargins(
+                            (3 * d).toInt(), 0, (3 * d).toInt(), 0
+                        )
+                    })
                 }
                 addView(bar, LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
@@ -1998,6 +2007,8 @@ class BookActivity : Activity() {
             ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         )
+        // 0.4.35：decorView 浮层不受 content 根 padding 影响，单独让出状态栏 / 导航栏区域
+        SystemBarInsets.applyTo(scrim)
         menuOverlay = scrim
         menuIsSearch = isSearch
     }
@@ -2037,6 +2048,8 @@ class BookActivity : Activity() {
         bottomBar.setTextColor(Color.parseColor(p.infoText))
         window.statusBarColor = Color.parseColor(p.bg)
         window.navigationBarColor = Color.parseColor(p.bg)
+        // 0.4.35：API 35+ 系统栏色被忽略，让出的区域由 content 根背景绘制，需跟随主题
+        findViewById<View>(android.R.id.content)?.setBackgroundColor(Color.parseColor(p.bg))
         val ic = window.insetsController
         if (ic != null) {
             val light = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or
@@ -2330,6 +2343,7 @@ class BookActivity : Activity() {
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
                 )
             )
+            SystemBarInsets.applyTo(scrim) // 0.4.35：弹注遮罩同样让出系统栏区域
             scrim.alpha = 0f
             scrim.animate().alpha(1f).setDuration(120).start() // Reasily 式淡入
         }
@@ -2498,15 +2512,21 @@ class BookActivity : Activity() {
         val selL = (l * d).toInt() + ox
         val selT = (t * d).toInt() + oy
         val selB = (b * d).toInt() + oy
-        var x = selL - (6 * d).toInt()
-        x = x.coerceIn((8 * d).toInt(), (screenW - mw - (8 * d).toInt()).coerceAtLeast((8 * d).toInt()))
+        // 0.4.35：坐标钳制改以「安全区」为边界，菜单不压到状态栏 / 导航栏下
+        val bars = SystemBarInsets.bars(window.decorView)
+        val pad = (8 * d).toInt()
+        val minX = bars.left + pad
+        val minY = bars.top + pad
+        val maxX = (screenW - bars.right - mw - pad).coerceAtLeast(minX)
+        var x = (selL - (6 * d).toInt()).coerceIn(minX, maxX)
         // M3.8：默认置于选区上方（选区顶 - 菜单高 - 12dp），不遮选区与拖动手柄
         var y = selT - mh - (12 * d).toInt()
-        if (y < (8 * d).toInt()) {
+        if (y < minY) {
             y = selB + (50 * d).toInt() // 上方放不下：移到下方
         }
-        if (y + mh > screenH) {
-            y = screenH - mh - (16 * d).toInt() // 上下都放不下：贴屏底
+        val bottomLimit = screenH - bars.bottom
+        if (y + mh > bottomLimit) {
+            y = (bottomLimit - mh - (16 * d).toInt()).coerceAtLeast(minY) // 上下都放不下：贴安全区底
         }
         pw.showAtLocation(window.decorView, android.view.Gravity.NO_GRAVITY, x.coerceAtLeast(0), y.coerceAtLeast(0))
         selPopup = pw
@@ -2670,6 +2690,7 @@ class BookActivity : Activity() {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
             )
         )
+        SystemBarInsets.applyTo(overlay) // 0.4.35：图片查看器内容不压到状态栏 / 导航栏下
         overlay.alpha = 0f
         overlay.animate().alpha(1f).setDuration(120).start() // Reasily 式淡入
         wv.loadDataWithBaseURL(url.substringBeforeLast('/') + "/", html, "text/html", "utf-8", null)

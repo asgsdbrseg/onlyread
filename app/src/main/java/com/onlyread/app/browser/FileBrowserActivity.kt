@@ -17,7 +17,6 @@ import android.widget.Toast
 import com.onlyread.app.R
 import com.onlyread.app.data.BookImporter
 import com.onlyread.app.util.Logx
-import com.onlyread.app.util.SystemBarInsets
 import java.io.File
 
 /**
@@ -46,8 +45,6 @@ class FileBrowserActivity : Activity() {
             return
         }
         setContentView(R.layout.activity_file_browser)
-        // 0.4.31：Android 15+ 强制 edge-to-edge，显式让出状态栏 / 导航栏区域
-        SystemBarInsets.applyTo(findViewById<View>(android.R.id.content))
         tvPath = findViewById(R.id.tvPath)
         emptyText = findViewById(R.id.tvEmpty)
         findViewById<View>(R.id.btnBack).setOnClickListener {

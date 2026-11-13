@@ -4,6 +4,8 @@
         <item name="android:colorPrimary">@color/primary</item>
         <item name="android:statusBarColor">@color/bg</item>
         <item name="android:windowLightStatusBar">true</item>
+        <!-- 0.4.35：edge-to-edge 下系统栏区域由内容背景绘制，浅底需深色导航图标才清晰 -->
+        <item name="android:windowLightNavigationBar">true</item>
         <item name="android:navigationBarColor">@color/bg</item>
     </style>
 </resources>

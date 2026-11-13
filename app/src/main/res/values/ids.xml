@@ -2,4 +2,6 @@
 <resources>
     <!-- 书架封面 ImageView 绑定当前应显示的封面路径，防止异步解码回来时条目已复用导致错位 -->
     <item name="cover_path_tag" type="id" />
+    <!-- 0.4.35：View 的初始 padding 缓存 key，保证系统栏 inset 多次分发不累加 -->
+    <item name="tag_insets_base" type="id" />
 </resources>

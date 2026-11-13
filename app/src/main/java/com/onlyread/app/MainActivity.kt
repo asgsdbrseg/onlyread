@@ -26,7 +26,6 @@ import com.onlyread.app.data.BookEntity
 import com.onlyread.app.data.BookImporter
 import com.onlyread.app.reader.BookActivity
 import com.onlyread.app.util.Logx
-import com.onlyread.app.util.SystemBarInsets
 import java.util.Collections
 import java.util.concurrent.Executors
 
@@ -82,8 +81,6 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
-        // 0.4.31：Android 15+ 强制 edge-to-edge，显式让出状态栏 / 导航栏区域
-        SystemBarInsets.applyTo(findViewById<View>(android.R.id.content))
 
         permCard = findViewById(R.id.permCard)
         emptyText = findViewById(R.id.emptyText)

@@ -1,5 +1,7 @@
 # onlyread · Android EPUB 阅读器
 
+代码：hy4
+
 个人自用的 Android EPUB 阅读器，架构思路参考 Lithium / Reasily（仅借鉴设计，代码独立实现）。
 
 设计上有两条硬约束：**直引原文件**——EPUB 始终从原始路径读取，只登记绝对路径与内容指纹，不复制到应用私有目录；**零第三方依赖**——除 JVM 单测外只使用 Android 框架与 Kotlin 标准库，在任何网络环境下都能快速构建。
@@ -11,7 +13,7 @@
 | 应用名 / 包名 | onlyread / `com.onlyread.app` |
 | 平台基线 | minSdk 31（Android 12）· targetSdk / compileSdk 35 |
 | 工具链 | Kotlin 2.0.21 · AGP 8.7.3 · Gradle 8.11.1 · JDK 17 |
-| 当前版本 | 0.4.34（versionCode 50） |
+| 当前版本 | 0.4.36（versionCode 52） |
 | 分发方式 | 侧载 APK，不上架应用商店 |
 | 权限 | 「所有文件访问」（`MANAGE_EXTERNAL_STORAGE`），绝对路径直读 |
 | 界面语言 | 中文 |
