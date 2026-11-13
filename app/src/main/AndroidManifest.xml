@@ -34,9 +34,14 @@
 
         <!-- 0.4.22：不再拦截配置变化，交给系统重建（这两个页面无自绘分页状态，
              onSaveInstanceState 已覆盖所需状态）。 -->
+        <!-- singleTask：书架在应用 task 中全局唯一。任意来源（桌面图标 / 外部「打开方式」）
+             启动 MainActivity 都复用同一实例并回调 onNewIntent，系统自动清掉其上 Activity，
+             无需在 onCreate 里自行转发 intent 或 finish，避免栈里叠出两个书架、后台导入
+             时新实例落在调用者 task 导致的误退出。 -->
         <activity
             android:name=".MainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:launchMode="singleTask">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

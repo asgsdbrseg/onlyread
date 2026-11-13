@@ -294,11 +294,12 @@ class BookActivity : Activity() {
               var st=document.getElementById('__theme');
               if(!st){st=document.createElement('style');st.id='__theme';
                 (document.head||document.documentElement).appendChild(st);}
+              // 0.4.34：与 ReaderHtml.themeCss 同源。夜间不再强制 color:inherit / 链接 !important，
+              // 书内文字颜色在三个主题下都保留（旧版夜间会把朱批红字抹成主题色）。
               var css='html,body{background:'+bg+' !important;color:'+text+' !important;}';
-              css+=night?('body p,body li,body dd,body dt,body blockquote,body td,body th,body div,body span,'
-                +'body pre,body h1,body h2,body h3,body h4,body h5,body h6{color:inherit !important;}'
-                +'body a{color:'+link+' !important;}')
-                        :('body a{color:'+link+';}');
+              css+='body a{color:'+link+';}';
+              css+=night?'mark.__srch{background:#6b5900 !important;color:#fff !important;}'
+                        :'mark.__srch{background:#ffd54f !important;color:#111 !important;}';
               st.textContent=css;
               try{document.body.style.setProperty('background',bg,'important');}catch(e){}};
             window.__setFont=function(px,lh,fam,anchor){var wr=__wrap(),ws=wr.style,de=document.documentElement,ds=de.style;
@@ -2045,24 +2046,11 @@ class BookActivity : Activity() {
         }
     }
 
-    /** 页面主题样式（doLoad 注入，id=__theme 便于 __setTheme 热更新） */
+    /** 页面主题样式（doLoad 注入，id=__theme 便于 __setTheme 热更新）。
+     *  0.4.34：夜间不再强制 color:inherit，书内文字颜色与「白」/「纸」一致保留。 */
     private fun themeCss(): String {
         val p = pal()
-        val sb = StringBuilder("<style id=\"__theme\">")
-        sb.append("html,body{background:").append(p.bg).append(" !important;color:").append(p.text).append(" !important;}")
-        if (themeId == ReaderPrefs.THEME_NIGHT) {
-            // 夜间：正文容器强制继承文字色，压制书籍自带浅底深字；链接给可读色
-            sb.append("body p,body li,body dd,body dt,body blockquote,body td,body th,body div,body span,")
-                .append("body pre,body h1,body h2,body h3,body h4,body h5,body h6{color:inherit !important;}")
-                .append("body a{color:").append(p.link).append(" !important;}")
-        } else {
-            sb.append("body a{color:").append(p.link).append(";}")
-        }
-        // M3：搜索命中高亮（夜间换深底避免刺眼）
-        if (themeId == ReaderPrefs.THEME_NIGHT) sb.append("mark.__srch{background:#6b5900 !important;color:#fff !important;}")
-        else sb.append("mark.__srch{background:#ffd54f !important;color:#111 !important;}")
-        sb.append("</style>")
-        return sb.toString()
+        return ReaderHtml.themeCss(p.bg, p.text, p.link, themeId == ReaderPrefs.THEME_NIGHT)
     }
 
     /** 每书排版样式（0 值=沿用书内样式，不注入）。

@@ -14,6 +14,26 @@ package com.onlyread.app.reader
 object ReaderHtml {
 
     /**
+     * 0.4.34：阅读页主题样式（纯函数，与 INIT_JS 的 __setTheme 同源）。
+     *
+     * 三个主题一视同仁：只设置 html/body 的背景与默认继承色，以及链接的兜底色，
+     * **不覆盖书内元素显式声明的颜色**。color 是继承属性，元素上的直接声明优先级
+     * 高于继承值，所以 html/body 的 `color:... !important` 不会屏蔽书内彩色文字；
+     * 旧版夜间额外注入的 `body p,body span,...{color:inherit !important}` 与
+     * `body a{color:... !important}` 却会直接命中元素，把朱批、校注、彩色链接一律
+     * 抹平，造成「夜」屏蔽文字颜色而「白」/「纸」正常的不一致，故一并移除。
+     *
+     * 搜索命中高亮是应用自身 UI（非书内内容），夜间单独配深底以免刺眼。
+     */
+    fun themeCss(bg: String, text: String, link: String, night: Boolean): String =
+        "<style id=\"__theme\">" +
+            "html,body{background:$bg !important;color:$text !important;}" +
+            "body a{color:$link;}" +
+            (if (night) "mark.__srch{background:#6b5900 !important;color:#fff !important;}"
+            else "mark.__srch{background:#ffd54f !important;color:#111 !important;}") +
+            "</style>"
+
+    /**
      * 块元素扫描正则（扫描与注入共用同一迭代序，保证 elemIndex 一致）。
      * 与 BookActivity 原 blockRe 完全一致。
      */

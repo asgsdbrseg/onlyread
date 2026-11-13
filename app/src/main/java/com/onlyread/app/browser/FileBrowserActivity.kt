@@ -17,6 +17,7 @@ import android.widget.Toast
 import com.onlyread.app.R
 import com.onlyread.app.data.BookImporter
 import com.onlyread.app.util.Logx
+import com.onlyread.app.util.SystemBarInsets
 import java.io.File
 
 /**
@@ -45,6 +46,8 @@ class FileBrowserActivity : Activity() {
             return
         }
         setContentView(R.layout.activity_file_browser)
+        // 0.4.31：Android 15+ 强制 edge-to-edge，显式让出状态栏 / 导航栏区域
+        SystemBarInsets.applyTo(findViewById<View>(android.R.id.content))
         tvPath = findViewById(R.id.tvPath)
         emptyText = findViewById(R.id.tvEmpty)
         findViewById<View>(R.id.btnBack).setOnClickListener {
@@ -117,18 +120,23 @@ class FileBrowserActivity : Activity() {
         return true
     }
 
-    private fun importEpub(file: File) {
+    private fun importEpub(file: File) = runImport {
+        BookImporter.importFile(this@FileBrowserActivity, file).message
+    }
+
+    /** 统一后台导入 + 结果回贴（目录点击 / SAF 选择共用）。 */
+    private fun runImport(block: () -> String) {
         Toast.makeText(this, R.string.tip_importing, Toast.LENGTH_SHORT).show()
         Thread {
             val msg = try {
-                BookImporter.importFile(this@FileBrowserActivity, file).message
+                block()
             } catch (e: Exception) {
                 "导入失败：${e.message}"
             }
             ui.post {
                 Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
-                // 0.4.28：导入结束即通知书架立即刷新（封面/最近在读顺序），不再单纯
-                // 依赖 MainActivity.onResume。重复导入不自动 finish，用户按返回键退出时
+                // 导入结束即通知书架立即刷新（封面/最近在读顺序），不再单纯依赖
+                // MainActivity.onResume。重复导入不自动 finish，用户按返回键退出时
                 // 同样会把结果带回；导入失败则不触发刷新。
                 if (!msg.startsWith("导入失败")) setResult(RESULT_OK)
                 if (msg.startsWith("已导入")) finish()

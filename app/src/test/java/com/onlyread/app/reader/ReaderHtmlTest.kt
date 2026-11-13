@@ -400,4 +400,42 @@ class ReaderHtmlTest {
     fun regexRanges_skipsEmptyMatches() {
         assertTrue("空匹配不应产生无意义结果", ReaderHtml.regexRanges("甲乙丙", Regex("x*")).isEmpty())
     }
+
+    // ————— 4. 主题 CSS（0.4.34：「夜」不得屏蔽书内文字颜色）—————
+
+    @Test
+    fun themeCss_nightKeepsBookTextColors() {
+        val night = ReaderHtml.themeCss("#000000", "#cccccc", "#8ab4f8", true)
+        assertFalse("夜间不应注入 color:inherit（会把书内朱批/校注抹成主题色）",
+            night.contains("color:inherit"))
+        assertFalse("链接色不应带 !important，否则书内彩色链接被覆盖",
+            Regex("body a\\{color:[^}]*!important").containsMatchIn(night))
+        assertFalse("夜间不应保留针对正文元素的颜色覆盖选择器",
+            night.contains("body p,") || night.contains("body span"))
+    }
+
+    @Test
+    fun themeCss_allThemesShareSameColorRules() {
+        val palettes = listOf(
+            Triple("#ffffff", "#222222", "#1a73e8") to false,   // 白
+            Triple("#f5ecd9", "#3b3226", "#8d5a2b") to false,   // 纸
+            Triple("#000000", "#cccccc", "#8ab4f8") to true     // 夜
+        )
+        val bases = palettes.map { (p, night) ->
+            ReaderHtml.themeCss(p.first, p.second, p.third, night)
+                .substringBefore("mark.__srch")
+                .replace(p.first, "BG").replace(p.second, "TEXT").replace(p.third, "LINK")
+        }
+        assertEquals("三个主题的颜色规则骨架必须完全一致（夜间不得特殊覆盖）", 1, bases.distinct().size)
+        assertTrue(bases[0].contains("html,body{background:BG !important;color:TEXT !important;}"))
+        assertTrue(bases[0].contains("body a{color:LINK;}"))
+    }
+
+    @Test
+    fun themeCss_keepsNightSearchHighlight() {
+        val night = ReaderHtml.themeCss("#000000", "#cccccc", "#8ab4f8", true)
+        val day = ReaderHtml.themeCss("#ffffff", "#222222", "#1a73e8", false)
+        assertTrue(night.contains("mark.__srch{background:#6b5900 !important;color:#fff !important;}"))
+        assertTrue(day.contains("mark.__srch{background:#ffd54f !important;color:#111 !important;}"))
+    }
 }

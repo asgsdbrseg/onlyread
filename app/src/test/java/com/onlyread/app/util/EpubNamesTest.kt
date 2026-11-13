@@ -38,4 +38,5 @@ class EpubNamesTest {
         assertFalse(EpubNames.isEpubMime(""))
         assertFalse(EpubNames.isEpubMime(null))
     }
+
 }

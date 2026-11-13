@@ -10,6 +10,7 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
 import android.util.LruCache
 import android.view.LayoutInflater
@@ -25,6 +26,7 @@ import com.onlyread.app.data.BookEntity
 import com.onlyread.app.data.BookImporter
 import com.onlyread.app.reader.BookActivity
 import com.onlyread.app.util.Logx
+import com.onlyread.app.util.SystemBarInsets
 import java.util.Collections
 import java.util.concurrent.Executors
 
@@ -40,6 +42,11 @@ import java.util.concurrent.Executors
  * 失败便永久停在占位色，直到下次滑动 / 旋转 / 切后台触发重绘才显示。现在解码完成后
  * 遍历当前可见子项，凡此刻正显示该封面路径的格子都立即更新，并保留一次
  * notifyDataSetChanged 兜底；同时导入返回后由 onActivityResult 主动刷新书架。
+ *
+ * 0.4.33：Manifest 声明 singleTask，书架在应用 task 中全局唯一。任意来源再次启动
+ * MainActivity 都由系统复用本实例并回调 onNewIntent，不再在 onCreate 里转发 intent
+ * 或 finish 自己——旧转发方案在应用位于后台时会让新实例落进调用者 task，既可能把
+ * CLEAR_TOP/SINGLE_TOP 命中未初始化的自己而崩溃，又会在 finish 后无书架可返回。
  */
 class MainActivity : Activity() {
 
@@ -75,6 +82,8 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        // 0.4.31：Android 15+ 强制 edge-to-edge，显式让出状态栏 / 导航栏区域
+        SystemBarInsets.applyTo(findViewById<View>(android.R.id.content))
 
         permCard = findViewById(R.id.permCard)
         emptyText = findViewById(R.id.emptyText)
@@ -110,6 +119,8 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        // 防御：Activity 正在结束时不触碰任何视图字段（singleTask 下正常路径不会走到）
+        if (isFinishing) return
         permCard.visibility = if (hasStoragePermission()) View.GONE else View.VISIBLE
         // 导入返回时已由 onActivityResult 立即刷新，跳过这次重复查询；
         // 其余情况（从阅读器返回、授权返回、首次启动）照常刷新最近在读顺序。
@@ -189,22 +200,29 @@ class MainActivity : Activity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        // Activity 已在栈顶被复用时（部分文件管理器带 NEW_TASK 复用），同样接住外部 VIEW
+        // singleTask：任意来源再次启动 MainActivity 都由系统复用本实例并走到这里。
+        // handleExternalEpub 内部只认 ACTION_VIEW，桌面 MAIN/LAUNCHER 恢复不会触发导入。
+        if (isFinishing || isDestroyed) return
         handleExternalEpub(intent)
     }
 
+    /** 防同一 Intent 被系统重复投递；带时间窗，允许用户稍后再次打开同一本书。 */
     private var lastExternalUri: String? = null
+    private var lastExternalAt = 0L
 
     /**
      * 外部文件夹「打开方式 / 用…打开」入口：严格解析真实路径后登记到书架，成功后直接打开阅读。
-     * 解析不到真实路径（第三方 provider / 云盘）时**不复制文件**，直接提示用户改用本机文件。
+     * 解析不到真实路径（Android/data 等分区存储目录、第三方 provider / 云盘）时**不复制文件**，
+     * 直接提示用户改用本机文件。
      */
     private fun handleExternalEpub(intent: Intent?) {
         if (intent?.action != Intent.ACTION_VIEW) return
         val uri = intent.data ?: return
         val key = uri.toString()
-        if (key == lastExternalUri) return // 同一 Intent 重复投递不重复导入
+        val now = SystemClock.elapsedRealtime()
+        if (key == lastExternalUri && now - lastExternalAt < 800L) return // 同一 Intent 重复投递
         lastExternalUri = key
+        lastExternalAt = now
         // 兜底 filter 会放行 octet-stream：先按 MIME / 文件名过滤，别把任意文件登记进书架
         if (!BookImporter.isEpubUri(this, uri)) {
             Toast.makeText(this, R.string.import_not_epub, Toast.LENGTH_LONG).show()
@@ -214,7 +232,7 @@ class MainActivity : Activity() {
         onIo {
             val outcome = runCatching { BookImporter.importUri(this@MainActivity, uri) }
             ui.post {
-                if (isDestroyed) return@post
+                if (isDestroyed || isFinishing) return@post
                 outcome.fold(
                     onSuccess = { res ->
                         Toast.makeText(this, res.message, Toast.LENGTH_SHORT).show()
