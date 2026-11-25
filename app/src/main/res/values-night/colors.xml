@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 0.4.37：书架 / 文件浏览器跟随系统深色模式。阅读页主题独立（ReaderPrefs），
+         其配色由 BookActivity.pal() 代码动态设置，不取这些资源，故只影响框架界面。 -->
+    <color name="primary">#1A2029</color>
+    <color name="bg">#121417</color>
+    <color name="text_main">#E6E8EB</color>
+    <color name="text_sub">#9AA0A6</color>
+    <color name="divider">#2A2E35</color>
+    <color name="cover_ph">#23272E</color>
+    <color name="perm_card">#3A3120</color>
+    <color name="ic_launcher_bg">#1A2029</color>
+</resources>

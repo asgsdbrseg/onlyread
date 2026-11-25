@@ -438,4 +438,29 @@ class ReaderHtmlTest {
         assertTrue(night.contains("mark.__srch{background:#6b5900 !important;color:#fff !important;}"))
         assertTrue(day.contains("mark.__srch{background:#ffd54f !important;color:#111 !important;}"))
     }
+
+    // ————— 5. 表格内容搜索（0.4.37：BLOCK_PATTERN 纳入 td/th/caption）—————
+
+    @Test
+    fun blockPattern_scansBareTableCells() {
+        // 表格直接挂在 body 下、无 div/p 包裹——旧版整段文字不在任何块内，完全漏搜
+        val html = "<html><body><table><tr><th>門人</th><td>曹門第一</td>" +
+            "<td><span>曹</span>門第二</td></tr></table></body></html>"
+        val blocks = ReaderHtml.BLOCK_PATTERN.findAll(html).toList()
+        val texts = blocks.map { ReaderHtml.extractVisibleText(it.groupValues[3]) }
+        assertTrue("应扫描到 th 单元格", texts.any { it.contains("門人") })
+        assertTrue("应扫描到纯文本 td 单元格", texts.any { it.contains("曹門第一") })
+        assertTrue("应扫描到跨行内标签的 td 单元格", texts.any { it.contains("曹門第二") })
+    }
+
+    @Test
+    fun blockPattern_tableCellHitsAreCounted() {
+        val html = "<table><tr><td>甲曹門乙</td></tr><tr><td>丙曹門丁曹門戊</td></tr></table>"
+        var total = 0
+        for (m in ReaderHtml.BLOCK_PATTERN.findAll(html)) {
+            val text = ReaderHtml.extractVisibleText(m.groupValues[3])
+            total += ReaderHtml.plainRanges(text, "曹門").size
+        }
+        assertEquals("两个单元格共三处命中都不应漏掉", 3, total)
+    }
 }

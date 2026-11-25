@@ -13,7 +13,7 @@
 | 应用名 / 包名 | onlyread / `com.onlyread.app` |
 | 平台基线 | minSdk 31（Android 12）· targetSdk / compileSdk 35 |
 | 工具链 | Kotlin 2.0.21 · AGP 8.7.3 · Gradle 8.11.1 · JDK 17 |
-| 当前版本 | 0.4.36（versionCode 52） |
+| 当前版本 | 0.4.40（versionCode 56） |
 | 分发方式 | 侧载 APK，不上架应用商店 |
 | 权限 | 「所有文件访问」（`MANAGE_EXTERNAL_STORAGE`），绝对路径直读 |
 | 界面语言 | 中文 |

@@ -162,16 +162,22 @@ class BookActivity : Activity() {
               if(r.left>=-2&&r.left<lim)return i;}return -1;}
             // 0.4.23：回报当前页所属目录标题锚点（从页首元素向前找最近的目录 id），
             // 使同文件多标题时目录当前项跟随阅读位置，而不是固定取最后一条。
-            function __report(){try{var o=__anchorOrd(),tf='';
-              var fs=window.__tocFrags||[];
-              if(fs.length&&o>=0){
-                var mp={};for(var k=0;k<fs.length;k++){if(fs[k])mp[fs[k]]=1;}
-                var es=__els();
-                for(var i=o;i>=0;i--){var n=es[i],hit=false;
-                  while(n&&n.nodeType===1){var v=n.getAttribute&&n.getAttribute('id');
-                    if(v&&mp[v]){tf=v;hit=true;break;}n=n.parentNode;}
-                  if(hit)break;}}
-              ReaderBridge.onLayout(__r.page,__r.total,o,tf);}catch(e){}}
+            // 0.4.37：上报必达——旧版把「锚点/目录计算」与 onLayout 上报放在同一个 try 里，
+            // 任一中间步骤（__anchorOrd/__els/getAttribute）抛异常就会连上报一起被吞掉，
+            // Kotlin 侧等不到回报 → 4 秒后误降级滚动（偶发分页失败的根因）。
+            // 现在分段容错：每段各自 try，最后无条件上报 page/total。
+            function __report(){var o=-1,tf='';
+              try{if(window.__initWd){clearTimeout(window.__initWd);window.__initWd=null;}}catch(e){}
+              try{o=__anchorOrd();}catch(e){}
+              try{var fs=window.__tocFrags||[];
+                if(fs.length&&o>=0){
+                  var mp={};for(var k=0;k<fs.length;k++){if(fs[k])mp[fs[k]]=1;}
+                  var es=__els();
+                  for(var i=o;i>=0;i--){var n=es[i],hit=false;
+                    while(n&&n.nodeType===1){var v=n.getAttribute&&n.getAttribute('id');
+                      if(v&&mp[v]){tf=v;hit=true;break;}n=n.parentNode;}
+                    if(hit)break;}}}catch(e){}
+              try{ReaderBridge.onLayout(__r.page,__r.total,o,tf);}catch(e){}}
             /** 元素所在页（内容坐标）；被 data-fnhide 隐藏时现场解除后重测。 */
             function __pageOfNode(fe){if(!fe)return -1;
               var r=fe.getBoundingClientRect();
@@ -237,7 +243,7 @@ class BookActivity : Activity() {
             // 阻止字体就绪后的 __reanchor 重定位覆盖已发生的翻页
             window.__go=function(n,byUser){var t=__r.total;n=Math.max(0,Math.min(n,t-1));
               if(window.__initDone&&byUser)window.__touched=true;__r.page=n;
-              __apply();__report();};
+              try{__apply();}finally{__report();}}; // 0.4.37：apply 抛异常也必须上报，避免降级
             function __recompute(){__meas();if(__r.page>=__r.total){__go(__r.total-1);return;}__report();}
             // M3.3：进度恢复后按锚重定位——首次 __initReader 定位发生在自定义字体
             // 加载完成前，布局漂移会让恢复位置偏差一页；fonts.ready 后重算锚页并纠正。
@@ -264,7 +270,12 @@ class BookActivity : Activity() {
               else if(a.text!==undefined&&a.text!==null){
                 var ft=window.__tocHit||__findByText(a.text);window.__tocHit=ft;
                 if(ft){var p5=__pageOfNode(ft);if(p5>=0&&p5!==__r.page)__go(p5);}}}
-            window.__initReader=function(W,G,Mx,anchor,Vx,Bx){__r.W=W||0;__r.G=G||0;__r.M=Mx||0;__r.V=Vx||34;__r.B=Bx||0;__meas();
+            window.__initReader=function(W,G,Mx,anchor,Vx,Bx){
+              // 0.4.37：看门狗——若 __meas/锚点计算中途抛异常，1.2s 后强制回报，
+              // 保证 Kotlin 侧 gotReport 一定能收到（与重试窗口配合，超时才降级）。
+              try{if(window.__initWd)clearTimeout(window.__initWd);
+                window.__initWd=setTimeout(function(){try{__report();}catch(e){}},1200);}catch(e){}
+              __r.W=W||0;__r.G=G||0;__r.M=Mx||0;__r.V=Vx||34;__r.B=Bx||0;__meas();
               window.__initAnchor=anchor||null;window.__touched=false;window.__initDone=false;
               var de=document.documentElement;de.scrollLeft=0;de.scrollTop=0;
               var pg=0;
@@ -555,6 +566,9 @@ class BookActivity : Activity() {
     private var lastSavedTotal = -1
     private var gotReport = false   // 本章节是否收到过分页回报
     private var scrollMode = false  // JS 分页失败时降级为竖向滚动
+    // 0.4.37：分页初始化重试——换章递增 token 使上一章的延迟回调失效；缓存 init JS 供重放。
+    private var loadToken = 0
+    private var lastInitJs = ""
 
     // M2：主题（全局）与排版（每书）
     private var themeId = ReaderPrefs.THEME_PAPER
@@ -694,7 +708,9 @@ class BookActivity : Activity() {
                     else -> "{\"page\":0}"
                 }
                 pendingAnchor = null
-                runJs("window.__initReader($pageW,$gap,$mL,$json,$mT,$mB);")
+                // 0.4.37：缓存本次初始化串，供延时重放（布局未就绪导致首次失败时自愈）
+                lastInitJs = "window.__initReader($pageW,$gap,$mL,$json,$mT,$mB);"
+                runJs(lastInitJs)
             }
 
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
@@ -736,7 +752,14 @@ class BookActivity : Activity() {
         val gd = android.view.GestureDetector(this, object : android.view.GestureDetector.SimpleOnGestureListener() {
             override fun onSingleTapUp(e: android.view.MotionEvent): Boolean {
                 if (scrollMode) return false
-                // 选区菜单已开：先收菜单，此次点击不翻页
+                // 0.4.39：有选中文字时，点击空白处优先取消选中（清高亮+收菜单），此次不翻页
+                if (hasSelection) {
+                    hasSelection = false
+                    selPopup?.dismiss()
+                    clearSelection()
+                    return true
+                }
+                // 兼容：菜单残留但无选区状态的兜底
                 if (selPopup?.isShowing == true) { selPopup?.dismiss(); return true }
                 val w = webView.width.coerceAtLeast(1)
                 val zone = when {
@@ -867,6 +890,7 @@ class BookActivity : Activity() {
             // 弹注浮层打开期间，selectionchange 只能来自弹注 WebView（主 WebView 被遮罩覆盖）
             val fromFn = fnWv?.parent != null
             ui.post {
+                hasSelection = text.isNotBlank()
                 if (text.isBlank()) selPopup?.dismiss()
                 else showSelectionMenu(text, l, t, r, b, fromFn)
             }
@@ -1085,6 +1109,10 @@ class BookActivity : Activity() {
         pendingAnchor = anchor
         gotReport = false
         scrollMode = false   // 每章重新尝试分页；4 秒无回报再降级
+        // 0.4.37：换章递增 token——上一章残留的「重试/降级」回调据此失效，
+        // 避免旧的降级回调在新章加载途中误把新章切成滚动模式（偶发失败来源之一）。
+        val token = ++loadToken
+        lastInitJs = ""
 
         // 关键：#__wrap 显式锁定宽度=目标列宽（column-width 只是提示值，不定宽会被拉伸导致列距漂移）
         // 几何：colW=pageW-2M，gap=2M → 列距=colW+gap=pageW；JS 会用分数精度实测值覆盖
@@ -1131,9 +1159,15 @@ class BookActivity : Activity() {
         val base = "https://$HOST/book/$bookId/" + if (curDir.isEmpty()) "" else "$curDir/"
         webView.loadDataWithBaseURL(base, full, "text/html", charset, null)
 
-        // 兜底：4 秒内未收到分页回报 → 降级竖向滚动模式（保证可读）
+        // 0.4.37：分页自愈——先 2s 重放一次初始化（布局/字体未就绪导致的首次失败可恢复），
+        // 仍无回报才在 4.6s 降级。所有回调校验 token，换章后立即失效，杜绝旧回调误伤新章。
         ui.postDelayed({
-            if (!gotReport && !scrollMode && !isFinishing) {
+            if (token == loadToken && !gotReport && !scrollMode && !isFinishing && lastInitJs.isNotEmpty()) {
+                runJs(lastInitJs) // 重放：__initReader 幂等，会重测几何并上报
+            }
+        }, 2000)
+        ui.postDelayed({
+            if (token == loadToken && !gotReport && !scrollMode && !isFinishing) {
                 scrollMode = true
                 runJs(
                     "(function(){var w=document.getElementById('__wrap'),b=document.body;" +
@@ -1148,7 +1182,7 @@ class BookActivity : Activity() {
                 bottomBar.text = "滚动模式（分页初始化失败）"
                 bottomBar.visibility = View.VISIBLE
             }
-        }, 4000)
+        }, 4600)
     }
 
     private fun injectHead(html: String, headCss: String): String =
@@ -2200,6 +2234,10 @@ class BookActivity : Activity() {
             }
             it.addJavascriptInterface(bridge, "ReaderBridge")
             it.setBackgroundColor(Color.parseColor(pal().bg))
+            // 0.4.37：弹注 WebView 自身的原生滚动条也要关掉。此前只关了外层 ScrollView，
+            // 当弹注内容超高、WebView 内部文档自行滚动时仍会露出滚动条（偶发）。
+            it.isVerticalScrollBarEnabled = false
+            it.isHorizontalScrollBarEnabled = false
             it.webViewClient = object : WebViewClient() {
                 override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean = true
                 override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? =
@@ -2222,6 +2260,12 @@ class BookActivity : Activity() {
         val popupCss = "<style>" + fontFaceCss() +
             // M3.7：弹注窗口改直角——压制书籍 CSS 可能给 html/body 设置的圆角/阴影
             "html,body{border-radius:0 !important;box-shadow:none !important;}" +
+            // 0.4.37：文档层滚动条也隐藏（双保险，配合 WebView 原生滚动条关闭）。
+            // 书籍自带 CSS 可能给 html/body/全域设 overflow:auto 或自定义滚动条，
+            // 内容超高时露出滚动条；这里统一压制，不影响滚动能力本身。
+            "html,body{scrollbar-width:none !important;-ms-overflow-style:none !important;}" +
+            "html::-webkit-scrollbar,body::-webkit-scrollbar,body *::-webkit-scrollbar" +
+            "{display:none !important;width:0 !important;height:0 !important;}" +
             "body{margin:0;padding:14px;background:${p.bg} !important;color:${p.text} !important;" +
             "font-size:${fnFontPx}px !important;line-height:1.65 !important;word-break:break-word;}" +
             fontFamilyRules("body") +
@@ -2383,6 +2427,8 @@ class BookActivity : Activity() {
     // ————— M3：选区菜单（Reasily 式：上动作行 + 下应用图标行） —————
 
     private var selPopup: android.widget.PopupWindow? = null
+    /** 0.4.39：当前是否存在选区——用于「点击空白处优先取消选中」判断 */
+    private var hasSelection = false
 
     /** M3：当前选区文本——拖动手柄扩展选区时 onSelection 会再进来，闭包引用此字段
      *  保证复制/分享/搜索/应用拿到的是最新选区（此前旧值导致"少一个字"） */
@@ -2481,10 +2527,13 @@ class BookActivity : Activity() {
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
             }
         }
+        // 0.4.38：focusable=false——popup 不抢焦点，否则 WebView 失焦会隐藏文本选择手柄（光标）
         val pw = android.widget.PopupWindow(
-            panel, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, true
+            panel, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, false
         )
+        pw.isFocusable = false
         pw.isOutsideTouchable = true
+        // 保持非 modal：外部触摸（含选择手柄）能继续传给 WebView，光标可见且可拖动
         pw.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.TRANSPARENT))
         pw.setOnDismissListener { if (selPopup === pw) selPopup = null }
         // M3 定位（0.4.5 规则）：先按需钳宽→重测→再定位。
@@ -2542,6 +2591,7 @@ class BookActivity : Activity() {
 
     /** 清除选区：主 WebView 与弹注 WebView 都清（动作完成后无残留高亮） */
     private fun clearSelection() {
+        hasSelection = false
         runJs("try{window.getSelection().removeAllRanges()}catch(e){}")
         val fw = fnWv
         if (fw != null && fw.parent != null) {

@@ -98,7 +98,7 @@
         <activity
             android:name=".reader.BookActivity"
             android:exported="false"
-            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode"
             android:windowSoftInputMode="adjustNothing" />
 
     </application>

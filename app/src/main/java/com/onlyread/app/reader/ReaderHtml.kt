@@ -37,8 +37,12 @@ object ReaderHtml {
      * 块元素扫描正则（扫描与注入共用同一迭代序，保证 elemIndex 一致）。
      * 与 BookActivity 原 blockRe 完全一致。
      */
+    // 0.4.37：加入 td/th/caption。此前表格单元格若未被 <div>/<p> 包裹（table 直接挂在
+    // body 下，古籍 EPUB 常见），整块文字不在任何扫描块内，全文搜索完全漏掉表格内容。
+    // 扫描与跳转共用本正则，加入后 elemIndex 口径仍一致；JS __els() 早已包含 td/th/table，
+    // 跳转注入的 data-srch0/mark 落在单元格上可被 __pageOfHit 精确定位。
     val BLOCK_PATTERN: Regex =
-        Regex("(?is)<(p|li|blockquote|h[1-6]|dd|dt|div)\\b([^>]*)>(.*?)</\\1\\s*>")
+        Regex("(?is)<(p|li|blockquote|h[1-6]|dd|dt|div|td|th|caption)\\b([^>]*)>(.*?)</\\1\\s*>")
 
     private val inlineTags = setOf(
         "a", "span", "u", "b", "i", "em", "strong", "sup", "sub", "small", "big",
